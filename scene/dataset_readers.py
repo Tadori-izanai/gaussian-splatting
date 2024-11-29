@@ -129,6 +129,30 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
+# if eval, modify the `train_cam_infos` and `test_cam_infos` to be this
+def get_train_test_cam_infos_if_eval(path, images, cam_intrinsics):
+    try:
+        cameras_ext_train_file = os.path.join(path, 'sparse/0', 'images_train.bin')
+        cameras_ext_test_file = os.path.join(path, 'sparse/0', 'images_test.bin')
+        cam_ext_train = read_extrinsics_binary(cameras_ext_train_file)
+        cam_ext_test = read_extrinsics_binary(cameras_ext_test_file)
+    except:
+        cameras_ext_train_file = os.path.join(path, 'sparse/0', 'images_train.txt')
+        cameras_ext_test_file = os.path.join(path, 'sparse/0', 'images_test.txt')
+        cam_ext_train = read_extrinsics_text(cameras_ext_train_file)
+        cam_ext_test = read_extrinsics_text(cameras_ext_test_file)
+    
+    reading_dir = "images" if images == None else images
+    train_cam_infos_unsorted = readColmapCameras(
+        cam_extrinsics=cam_ext_train, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir)
+    )
+    test_cam_infos_unsorted = readColmapCameras(
+        cam_extrinsics=cam_ext_test, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir)
+    )
+    train_cam_infos = sorted(train_cam_infos_unsorted.copy(), key = lambda x : x.image_name)
+    test_cam_infos = sorted(test_cam_infos_unsorted.copy(), key = lambda x : x.image_name)
+    return train_cam_infos, test_cam_infos
+
 def readColmapSceneInfo(path, images, eval, llffhold=8):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
@@ -148,6 +172,13 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
     if eval:
         train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
         test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+        if os.path.exists(
+            os.path.join(path, 'sparse/0', 'images_train.bin')
+        ) or os.path.exists(
+            os.path.join(path, 'sparse/0', 'images_train.txt')
+        ):
+            # train_cam_infos, test_cam_infos = get_train_test_cam_infos_if_eval(path, images, cam_intrinsics)
+            pass
     else:
         train_cam_infos = cam_infos
         test_cam_infos = []
