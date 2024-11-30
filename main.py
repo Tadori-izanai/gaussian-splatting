@@ -18,7 +18,35 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 from train import prepare_output_and_logger
-from arguments import GroupParams
+from arguments import get_default_args
+from utils.general_utils import build_rotation, quat_mult, weighted_l2_loss_v2, weighted_l2_loss_v1
+
+def eval_img_loss(image, gt_image, opt) -> torch.Tensor:
+    ll1 = l1_loss(image, gt_image)
+    loss = (1.0 - opt.lambda_dssim) * ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+    return loss
+
+def eval_rigid_loss(gaussians: GaussianModel) -> torch.Tensor:
+    curr_rot = gaussians.get_rotation
+    relative_rot = quat_mult(curr_rot, gaussians.prev_rotation_inv)
+    rotation = build_rotation(relative_rot)
+
+    prev_offset = gaussians.prev_xyz[gaussians.neighbor_indices] - gaussians.prev_xyz[:, None]
+    curr_offset = gaussians.get_xyz[gaussians.neighbor_indices] - gaussians.get_xyz[:, None]
+    curr_offset_in_prev_coord = (rotation.transpose(2, 1)[:, None] @ curr_offset[:, :, :, None]).squeeze(-1)
+    return weighted_l2_loss_v2(curr_offset_in_prev_coord, prev_offset, gaussians.neighbor_weight)
+
+def eval_rot_loss(gaussians: GaussianModel) -> torch.Tensor:
+    curr_rot = gaussians.get_rotation
+    relative_rot = quat_mult(curr_rot, gaussians.prev_rotation_inv)
+    return weighted_l2_loss_v2(
+        relative_rot[gaussians.neighbor_indices], relative_rot[:, None], gaussians.neighbor_weight
+    )
+
+def eval_iso_loss(gaussians: GaussianModel) -> torch.Tensor:
+    curr_offset = gaussians.get_xyz[gaussians.neighbor_indices] - gaussians.get_xyz[:, None]
+    curr_offset_mag = torch.sqrt((curr_offset ** 2).sum(-1) + 1e-20)
+    return weighted_l2_loss_v1(curr_offset_mag, gaussians.neighbor_dist, gaussians.neighbor_weight)
 
 def train(dataset, opt, pipe, gaussians=None, prev_iters=0):
     _ = prepare_output_and_logger(dataset)
@@ -48,11 +76,16 @@ def train(dataset, opt, pipe, gaussians=None, prev_iters=0):
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
         render_pkg["visibility_filter"], render_pkg["radii"]
+        gt_image = viewpoint_cam.original_image.cuda()
 
         # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        loss = eval_img_loss(image, gt_image, opt)
+        if opt.rigid_weight is not None:
+            loss += opt.rigid_weight * eval_rigid_loss(gaussians)
+        if opt.rot_weight is not None:
+            loss += opt.rot_weight * eval_rot_loss(gaussians)
+        if opt.iso_weight is not None:
+            loss += opt.iso_weight * eval_iso_loss(gaussians)
         loss.backward()
 
         with torch.no_grad():
@@ -88,49 +121,13 @@ def train(dataset, opt, pipe, gaussians=None, prev_iters=0):
 
     progress_bar.close()
 
-
-def get_default_args() -> tuple:
-    dataset_args = GroupParams()
-    dataset_args.sh_degree = 3
-    dataset_args.source_path = ""
-    dataset_args.model_path = ""
-    dataset_args.images = "images"
-    dataset_args.resolution = -1
-    dataset_args.white_background = False
-    dataset_args.data_device = "cuda"
-    dataset_args.eval = False
-
-    pipes_args = GroupParams()
-    pipes_args.convert_SHs_python = False
-    pipes_args.compute_cov3D_python = False
-    pipes_args.debug = False
-
-    opt_args = GroupParams()
-    opt_args.iterations = 30_000
-    opt_args.position_lr_init = 0.00016
-    opt_args.position_lr_final = 0.0000016
-    opt_args.position_lr_delay_mult = 0.01
-    opt_args.position_lr_max_steps = 30_000
-    opt_args.feature_lr = 0.0025
-    opt_args.opacity_lr = 0.05
-    opt_args.scaling_lr = 0.005
-    opt_args.rotation_lr = 0.001
-    opt_args.percent_dense = 0.01
-    opt_args.lambda_dssim = 0.2
-    opt_args.densification_interval = 100
-    opt_args.opacity_reset_interval = 3000
-    opt_args.densify_from_iter = 500
-    opt_args.densify_until_iter = 15_000
-    opt_args.densify_grad_threshold = 0.0002
-    opt_args.random_background = False
-
-    return dataset_args, pipes_args, opt_args
-
 if __name__ == '__main__':
     safe_state(False)
     torch.autograd.set_detect_anomaly(False)
+
     dataset, pipes, opt = get_default_args()
     dataset.eval = True
+    dataset.sh_degree = 0
 
     # trains "start"
     dataset.has_gaussians = False
@@ -138,11 +135,18 @@ if __name__ == '__main__':
     dataset.source_path = os.path.realpath("data/USB100109/start")
     train(dataset, opt, pipes, gaussians=gaussians, prev_iters=0)
 
+    gaussians.initialize_neighbors(20)
+
     # trains "end" from "start" with no densification
     opt.densify_until_iter = 0
     # and optimizes only positions and rotations
     opt.feature_lr = 0
     opt.opacity_lr = 0
     opt.scaling_lr = 0
+    # adds physical priors
+    opt.rigid_weight = 1.0
+    opt.rot_weight = 1.0
+    opt.iso_weight = 100.0
+    # sets the dataset to "end" and trains
     dataset.source_path = os.path.realpath("data/USB100109/end")
     train(dataset, opt, pipes, gaussians=gaussians, prev_iters=opt.iterations)  # the same output model_path as above

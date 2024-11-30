@@ -21,6 +21,8 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 
+from utils.general_utils import knn
+
 class GaussianModel:
 
     def setup_functions(self):
@@ -57,6 +59,14 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
+
+        self.prev_size = None
+        self.neighbor_indices = None
+        self.neighbor_weight = None
+        self.neighbor_dist = None
+        self.prev_xyz = None
+        self.prev_rotation = None
+        self.prev_rotation_inv = None
 
     def capture(self):
         return (
@@ -405,3 +415,18 @@ class GaussianModel:
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
+
+    def size(self):
+        return len(self._xyz)
+
+    def initialize_neighbors(self, num_knn=20):
+        neighbor_dist, neighbor_indices = knn(self._xyz.detach().cpu().numpy(), num_knn)
+        neighbor_weight = 2 * np.exp(-2000 * neighbor_dist)
+        self.prev_size = self.size()
+        self.neighbor_indices = torch.tensor(neighbor_indices).cuda().long().contiguous()
+        self.neighbor_weight = torch.tensor(neighbor_weight).cuda().float().contiguous()
+        self.neighbor_dist = torch.tensor(neighbor_dist).cuda().float().contiguous()
+        self.prev_xyz = self._xyz.detach()
+        self.prev_rotation = self.rotation_activation(self._rotation).detach()
+        self.prev_rotation_inv = self.prev_rotation
+        self.prev_rotation_inv[:, 1:] *= -1

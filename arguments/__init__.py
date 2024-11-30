@@ -110,3 +110,44 @@ def get_combined_args(parser : ArgumentParser):
         if v != None:
             merged_dict[k] = v
     return Namespace(**merged_dict)
+
+def get_default_args() -> tuple:
+    dataset = GroupParams()
+    dataset.sh_degree = 3
+    dataset.source_path = ""
+    dataset.model_path = ""
+    dataset.images = "images"
+    dataset.resolution = -1
+    dataset.white_background = False
+    dataset.data_device = "cuda"
+    dataset.eval = False
+
+    pipes = GroupParams()
+    pipes.convert_SHs_python = False
+    pipes.compute_cov3D_python = False
+    pipes.debug = False
+
+    opt = GroupParams()
+    opt.iterations = 30_000
+    opt.position_lr_init = 0.00016
+    opt.position_lr_final = 0.0000016
+    opt.position_lr_delay_mult = 0.01
+    opt.position_lr_max_steps = 30_000
+    opt.feature_lr = 0.0025
+    opt.opacity_lr = 0.05
+    opt.scaling_lr = 0.005
+    opt.rotation_lr = 0.001
+    opt.percent_dense = 0.01
+    opt.lambda_dssim = 0.2
+    opt.densification_interval = 100
+    opt.opacity_reset_interval = 3000
+    opt.densify_from_iter = 500
+    opt.densify_until_iter = 15_000
+    opt.densify_grad_threshold = 0.0002
+    opt.random_background = False
+
+    opt.rigid_weight = None
+    opt.rot_weight = None
+    opt.iso_weight = None
+
+    return dataset, pipes, opt
