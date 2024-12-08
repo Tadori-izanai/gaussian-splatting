@@ -26,6 +26,9 @@ def eval_img_loss(image, gt_image, opt) -> torch.Tensor:
     loss = (1.0 - opt.lambda_dssim) * ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
     return loss
 
+def eval_cd_loss(gaussians: GaussianModel, gt_gaussians: GaussianModel):
+    pass
+
 def eval_rigid_loss(gaussians: GaussianModel) -> torch.Tensor:
     curr_rot = gaussians.get_rotation
     relative_rot = quat_mult(curr_rot, gaussians.prev_rotation_inv)
@@ -70,6 +73,14 @@ def show_losses(iteration: int, img_loss, rigid_loss, rot_loss, iso_loss):
             if loss is not None:
                 loss_msg += f"  {name} {loss:.{7}f}"
         print(loss_msg)
+
+def get_rgb_form_displacement(disp: torch.Tensor):
+    disp = torch.log(1 + 100 * disp + 1e-20) / torch.log(torch.as_tensor(1 + 100))
+    r = torch.clamp(disp, 0., 1.)
+    g = torch.clamp(1. - disp, 0., 1.)
+    b = torch.clamp(.5 * disp, 0., 1.)
+    rgb_tensor = torch.stack((r, g, b), dim=-1)
+    return rgb_tensor
 
 def train(dataset, opt, pipe, gaussians=None, prev_iters=0):
     _ = prepare_output_and_logger(dataset)
@@ -136,7 +147,9 @@ def train(dataset, opt, pipe, gaussians=None, prev_iters=0):
     progress_bar.close()
     torch.save((gaussians.capture(), opt.iterations), os.path.join(scene.model_path, 'chkpnt.pth'))
 
-def fit_demo(st_path=None, ed_path=None):
+def get_two_gaussians(st_path=None, ed_path=None, w=None, k=20, lam_omg=2000) -> tuple[GaussianModel, GaussianModel]:
+    if w is None:
+        w = [None, None, None]
     dataset, pipes, opt = get_default_args()
     if not os.path.exists(ed_path):
         safe_state(False)
@@ -157,15 +170,15 @@ def fit_demo(st_path=None, ed_path=None):
         st_checkpoint = os.path.join(st_path, 'chkpnt.pth')
         model_params, prev_iters = torch.load(st_checkpoint)
         gaussians = GaussianModel(dataset.sh_degree).restore(model_params, opt)
-        gaussians.initialize_neighbors(20)
+        gaussians.initialize_neighbors(k, lam_omg)
 
         opt.densify_until_iter = 0
         opt.feature_lr = 0
         opt.opacity_lr = 0
         opt.scaling_lr = 0
-        opt.rigid_weight = 1
-        opt.rot_weight = 1
-        opt.iso_weight = 100
+        opt.rigid_weight = w[0]
+        opt.rot_weight = w[1]
+        opt.iso_weight = w[2]
         dataset.source_path = os.path.realpath("data/USB100109/end")
         dataset.model_path = ed_path
         train(dataset, opt, pipes, gaussians=gaussians, prev_iters=prev_iters)
@@ -176,38 +189,31 @@ def fit_demo(st_path=None, ed_path=None):
     gaussians_st = GaussianModel(dataset.sh_degree).restore(model_params, opt)
     model_params, _ = torch.load(ed_checkpoint)
     gaussians_ed = GaussianModel(dataset.sh_degree).restore(model_params, opt)
-    # todo
+    return gaussians_st, gaussians_ed
+
+def fit_demo(st_path=None, ed_path=None, w=None, k=20, lam_omg=2000):
+    gaussians_st, gaussians_ed = get_two_gaussians(st_path, ed_path, w, k, lam_omg)
+    displacements = (gaussians_ed.get_xyz - gaussians_st.get_xyz).norm(dim=1)
+    normalized_displacements = displacements / torch.max(displacements)
+
+    # rgb = get_rgb_form_displacement(normalized_displacements)
+    # gaussians_st.set_colors(rgb)
+    # gaussians_st.save_ply(os.path.join(st_path, 'point_cloud/iteration_1/point_cloud.ply'))
+    # gaussians_ed.set_colors(rgb)
+    # gaussians_ed.save_ply(os.path.join(ed_path, 'point_cloud/iteration_1/point_cloud.ply'))
+
+    gaussians_st.hide_static(normalized_displacements)
+    gaussians_st.save_ply(os.path.join(st_path, 'point_cloud/iteration_2/point_cloud.ply'))
+    gaussians_ed.hide_static(normalized_displacements)
+    gaussians_ed.save_ply(os.path.join(ed_path, 'point_cloud/iteration_2/point_cloud.ply'))
+
 
 if __name__ == '__main__':
+    # st = 'output/fit_st'
+    # ed = 'output/fit_ed-1_1_100'
+    # fit_demo(st, ed, w=[1, 1, 100], k=20)
+
+    # ArticulatedGS settings
     st = 'output/fit_st'
-    ed = 'output/fit_ed-1_1_100'
-    fit_demo(st, ed)
-    exit(0)
-
-    safe_state(False)
-    torch.autograd.set_detect_anomaly(False)
-
-    dataset, pipes, opt = get_default_args()
-    dataset.eval = True
-    dataset.sh_degree = 0
-
-    # trains "start"
-    gaussians = GaussianModel(dataset.sh_degree)
-    dataset.source_path = os.path.realpath("data/USB100109/start")
-    train(dataset, opt, pipes, gaussians=gaussians, prev_iters=0)
-
-    gaussians.initialize_neighbors(20)
-
-    # trains "end" from "start" with no densification
-    opt.densify_until_iter = 0
-    # and optimizes only positions and rotations
-    opt.feature_lr = 0
-    opt.opacity_lr = 0
-    opt.scaling_lr = 0
-    # adds physical priors
-    opt.rigid_weight = 1
-    opt.rot_weight = 1
-    opt.iso_weight = 100
-    # sets the dataset to "end" and trains
-    dataset.source_path = os.path.realpath("data/USB100109/end")
-    train(dataset, opt, pipes, gaussians=gaussians, prev_iters=opt.iterations)  # the same output model_path as above
+    ed = 'output/fit_ed-r1'
+    fit_demo(st, ed, w=[1, None, None], lam_omg=20)

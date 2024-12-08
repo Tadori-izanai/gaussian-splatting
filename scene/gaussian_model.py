@@ -420,9 +420,9 @@ class GaussianModel:
     def size(self):
         return len(self._xyz)
 
-    def initialize_neighbors(self, num_knn=20):
+    def initialize_neighbors(self, num_knn=20, lambda_omega=2000):
         neighbor_dist, neighbor_indices = knn(self._xyz.detach().cpu().numpy(), num_knn)
-        neighbor_weight = 2 * np.exp(-2000 * neighbor_dist)
+        neighbor_weight = 2 * np.exp(-lambda_omega * neighbor_dist)
         self.prev_size = self.size()
         self.neighbor_indices = torch.tensor(neighbor_indices).cuda().long().contiguous()
         self.neighbor_weight = torch.tensor(neighbor_weight).cuda().float().contiguous()
@@ -431,3 +431,12 @@ class GaussianModel:
         self.prev_rotation = self.rotation_activation(self._rotation).detach()
         self.prev_rotation_inv = self.prev_rotation
         self.prev_rotation_inv[:, 1:] *= -1
+
+    def set_colors(self, rgb_tensor: torch.Tensor):
+        with torch.no_grad():
+            self._features_dc.copy_(RGB2SH(rgb_tensor).unsqueeze(1))
+            self._features_rest.zero_()
+
+    def hide_static(self, dist):
+        with torch.no_grad():
+            self._opacity[dist < 0.1] = 0
