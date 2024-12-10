@@ -15,6 +15,7 @@ from datetime import datetime
 import numpy as np
 import random
 from scipy.spatial import KDTree
+from scipy.stats import gaussian_kde
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -154,3 +155,86 @@ def weighted_l2_loss_v1(x, y, w):
 
 def weighted_l2_loss_v2(x, y, w):
     return torch.sqrt(((x - y) ** 2).sum(-1) * w + 1e-20).mean()
+
+
+import numpy as np
+from scipy.stats import gaussian_kde
+
+
+def otsu_with_peak_filtering(data, std_multiplier=3, bins=256):
+    """
+    使用主峰截取后再应用 Otsu 方法计算阈值。
+
+    参数:
+        data (numpy.ndarray): 输入数据，1D 数组。
+        std_multiplier (float): 主峰范围的标准差倍数，默认值为3。
+        bins (int): 用于 Otsu 方法的直方图分箱数，默认值为256。
+
+    返回:
+        float: 计算得到的阈值。
+    """
+    # 密度估计
+    density = gaussian_kde(data)
+    x_vals = np.linspace(min(data), max(data), 1000)
+    y_vals = density(x_vals)
+
+    # 找到主峰位置
+    peak_idx = np.argmax(y_vals)
+    peak_value = x_vals[peak_idx]
+
+    # 设定主峰附近的截取范围
+    std_dev = np.std(data)
+    lower_bound = peak_value - std_multiplier * std_dev
+    upper_bound = peak_value + std_multiplier * std_dev
+    filtered_data = data[(data >= lower_bound) & (data <= upper_bound)]
+
+    # Otsu 方法计算阈值
+    def otsu_threshold_bias_towards_higher(data, bins=256, bias_factor=1.5):
+        """
+        修改版 Otsu 方法，倾向于输出较大的阈值。
+
+        参数:
+            data (numpy.ndarray): 输入数据，1D 数组。
+            bins (int): 用于直方图分箱数，默认值为256。
+            bias_factor (float): 偏向大阈值的因子（>1 时倾向更大值）。
+
+        返回:
+            float: 计算得到的阈值。
+        """
+        # 计算直方图
+        hist, bin_edges = np.histogram(data, bins=bins, range=(min(data), max(data)), density=True)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        total_weight = np.sum(hist)
+        total_mean = np.sum(hist * bin_centers)
+        max_between_class_variance = 0
+        threshold = 0
+
+        weight_bg = 0
+        mean_bg = 0
+
+        for i in range(len(hist)):
+            weight_bg += hist[i]
+            mean_bg += hist[i] * bin_centers[i]
+
+            weight_fg = total_weight - weight_bg
+            if weight_bg == 0 or weight_fg == 0:
+                continue
+
+            mean_fg = (total_mean - mean_bg) / weight_fg
+            between_class_variance = weight_bg * weight_fg * (mean_bg / weight_bg - mean_fg) ** 2
+
+            # 增加偏向大阈值的因子
+            between_class_variance *= bin_centers[i] ** (bias_factor - 1)
+
+            if between_class_variance > max_between_class_variance:
+                max_between_class_variance = between_class_variance
+                threshold = bin_centers[i]
+
+        return threshold
+
+    threshold = otsu_threshold_bias_towards_higher(filtered_data, bins)
+    return threshold
+
+
+

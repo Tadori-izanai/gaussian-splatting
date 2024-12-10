@@ -10,3 +10,4 @@ screenshots
 data/
 output/
 .idea/
+submodules/pytorch3d/

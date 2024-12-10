@@ -437,6 +437,6 @@ class GaussianModel:
             self._features_dc.copy_(RGB2SH(rgb_tensor).unsqueeze(1))
             self._features_rest.zero_()
 
-    def hide_static(self, dist):
+    def hide_static(self, dist, threshold):
         with torch.no_grad():
-            self._opacity[dist < 0.1] = 0
+            self._opacity[dist < threshold] = -1e514

@@ -149,5 +149,9 @@ def get_default_args() -> tuple:
     opt.rigid_weight = None
     opt.rot_weight = None
     opt.iso_weight = None
+    opt.cd_weight = None
+    opt.cd_numbers = 10000_0
+    opt.cd_from_iter = 1000
+    opt.cd_until_iter = 5000
 
     return dataset, pipes, opt
