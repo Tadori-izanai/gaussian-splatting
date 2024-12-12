@@ -142,8 +142,10 @@ def knn(points: np.ndarray, num_knn: int):
     return distances, indices
 
 def quat_mult(q1, q2):
-    w1, x1, y1, z1 = q1.T
-    w2, x2, y2, z2 = q2.T
+    # w1, x1, y1, z1 = q1.T
+    # w2, x2, y2, z2 = q2.T
+    w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+    w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
     w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
     x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
     y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
@@ -156,10 +158,33 @@ def weighted_l2_loss_v1(x, y, w):
 def weighted_l2_loss_v2(x, y, w):
     return torch.sqrt(((x - y) ** 2).sum(-1) * w + 1e-20).mean()
 
-
-import numpy as np
-from scipy.stats import gaussian_kde
-
+def mat2quat(m):
+    t = torch.trace(m)
+    if t > 0:
+        s = torch.sqrt(1.0 + t) * 2
+        w = 0.25 * s
+        x = (m[2, 1] - m[1, 2]) / s
+        y = (m[0, 2] - m[2, 0]) / s
+        z = (m[1, 0] - m[0, 1]) / s
+    elif (m[0, 0] > m[1, 1]) and (m[0, 0] > m[2, 2]):
+        s = torch.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2
+        w = (m[2, 1] - m[1, 2]) / s
+        x = 0.25 * s
+        y = (m[0, 1] + m[1, 0]) / s
+        z = (m[0, 2] + m[2, 0]) / s
+    elif m[1, 1] > m[2, 2]:
+        s = torch.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2
+        w = (m[0, 2] - m[2, 0]) / s
+        x = (m[0, 1] + m[1, 0]) / s
+        y = 0.25 * s
+        z = (m[1, 2] + m[2, 1]) / s
+    else:
+        s = torch.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2
+        w = (m[1, 0] - m[0, 1]) / s
+        x = (m[0, 2] + m[2, 0]) / s
+        y = (m[1, 2] + m[2, 1]) / s
+        z = 0.25 * s
+    return torch.tensor([w, x, y, z])
 
 def otsu_with_peak_filtering(data, std_multiplier=3, bins=256):
     """
@@ -189,7 +214,7 @@ def otsu_with_peak_filtering(data, std_multiplier=3, bins=256):
     filtered_data = data[(data >= lower_bound) & (data <= upper_bound)]
 
     # Otsu 方法计算阈值
-    def otsu_threshold_bias_towards_higher(data, bins=256, bias_factor=1.5):
+    def otsu_threshold_bias_towards_higher(data, bins=256, bias_factor=1.25):
         """
         修改版 Otsu 方法，倾向于输出较大的阈值。
 

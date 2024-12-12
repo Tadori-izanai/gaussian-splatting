@@ -110,10 +110,22 @@ class GaussianModel:
     @property
     def get_rotation(self):
         return self.rotation_activation(self._rotation)
+
+    @property
+    def get_rotation_raw(self):
+        return self._rotation
+
+    @get_rotation_raw.setter
+    def get_rotation_raw(self, value):
+        self._rotation = value
     
     @property
     def get_xyz(self):
         return self._xyz
+
+    @get_xyz.setter
+    def get_xyz(self, value):
+        self._xyz = value
     
     @property
     def get_features(self):
@@ -416,6 +428,29 @@ class GaussianModel:
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
+
+    def cancel_grads(self):
+        self._xyz.requires_grad_(False)
+        self._features_dc.requires_grad_(False)
+        self._features_rest.requires_grad_(False)
+        self._scaling.requires_grad_(False)
+        self._rotation.requires_grad_(False)
+        self._opacity.requires_grad_(False)
+
+        self.optimizer = None
+
+    def training_se3_setup(self, training_args):
+        # self._xyz.requires_grad_(False)
+        self._features_dc.requires_grad_(False)
+        self._features_rest.requires_grad_(False)
+        self._scaling.requires_grad_(False)
+        # self._rotation.requires_grad_(False)
+        self._opacity.requires_grad_(False)
+        l = [
+            {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+        ]
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
     def size(self):
         return len(self._xyz)

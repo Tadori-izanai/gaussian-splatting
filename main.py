@@ -17,19 +17,12 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+import matplotlib.pyplot as plt
 from train import prepare_output_and_logger
 from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses
 from utils.general_utils import otsu_with_peak_filtering
-import matplotlib.pyplot as plt
-
-def get_rgb_form_displacement(disp: torch.Tensor):
-    disp = torch.log(1 + 100 * disp + 1e-20) / torch.log(torch.as_tensor(1 + 100))
-    r = torch.clamp(disp, 0., 1.)
-    g = torch.clamp(1. - disp, 0., 1.)
-    b = torch.clamp(.5 * disp, 0., 1.)
-    rgb_tensor = torch.stack((r, g, b), dim=-1)
-    return rgb_tensor
+from scene.articulation_model import ArticulationModel
 
 def train(dataset, opt, pipe, gaussians=None, gt_gaussians=None, prev_iters=0):
     _ = prepare_output_and_logger(dataset)
@@ -96,16 +89,68 @@ def train(dataset, opt, pipe, gaussians=None, gt_gaussians=None, prev_iters=0):
     torch.save((gaussians.capture(), opt.iterations), os.path.join(scene.model_path, 'chkpnt.pth'))
 
 def get_two_gaussians(st_path=None, ed_path=None) -> tuple[GaussianModel, GaussianModel]:
-    dataset, pipes, opt = get_default_args()
-    st_checkpoint = os.path.join(st_path, 'chkpnt.pth')
-    ed_checkpoint = os.path.join(ed_path, 'chkpnt.pth')
-    model_params, _ = torch.load(st_checkpoint)
-    gaussians_st = GaussianModel(dataset.sh_degree).restore(model_params, opt)
-    model_params, _ = torch.load(ed_checkpoint)
-    gaussians_ed = GaussianModel(dataset.sh_degree).restore(model_params, opt)
+    gaussians_st, gaussians_ed = GaussianModel(0), GaussianModel(0)
+    gaussians_st.load_ply(os.path.join(st_path, 'point_cloud/iteration_30000/point_cloud.ply'))
+    try:
+        gaussians_ed.load_ply(os.path.join(ed_path, 'point_cloud/iteration_30000/point_cloud.ply'))
+    except:
+        gaussians_ed.load_ply(os.path.join(ed_path, 'point_cloud/iteration_60000/point_cloud.ply'))
     return gaussians_st, gaussians_ed
 
+def show_change(st_path, ed_path):
+    gaussians_st, gaussians_ed = get_two_gaussians(st_path, ed_path)
+    print(gaussians_st.get_scaling[:5] - gaussians_ed.get_scaling[:5])
+    print(gaussians_st.get_opacity[:5] - gaussians_ed.get_opacity[:5])
+
+def train_one(path, data_path):
+    dataset, pipes, opt = get_default_args()
+    safe_state(False)
+    torch.autograd.set_detect_anomaly(False)
+
+    dataset.eval = True
+    dataset.sh_degree = 0
+    gaussians = GaussianModel(dataset.sh_degree)
+    dataset.source_path = os.path.realpath(data_path)
+    dataset.model_path = path
+    train(dataset, opt, pipes, gaussians=gaussians, prev_iters=0)
+
+def train_from_st(out_path, st_path, gt_path=None, data_path='data/USB100109/'):
+    dataset, pipes, opt = get_default_args()
+    model_params, prev_iters = torch.load(os.path.join(st_path, 'chkpnt.pth'))
+    gaussians = GaussianModel(dataset.sh_degree).restore(model_params, opt)
+
+    gaussians.initialize_neighbors(num_knn=20, lambda_omega=20)
+    # gaussians.training_se3_setup(opt)
+
+    gt_gaussians = None
+    if gt_path is not None:
+        model_params, _ = torch.load(os.path.join(gt_path, 'chkpnt.pth'))
+        gt_gaussians = GaussianModel(dataset.sh_degree).restore(model_params, opt)
+
+    safe_state(False)
+    torch.autograd.set_detect_anomaly(False)
+    dataset.eval = True
+    dataset.sh_degree = 0
+
+    opt.densify_until_iter = 0
+    opt.rigid_weight = 1
+    opt.rot_weight = .1
+    opt.iso_weight = 1
+    opt.cd_weight = 20
+    opt.cd_until_iter = 10_000
+    dataset.source_path = os.path.realpath(os.path.join(data_path, 'end'))
+    dataset.model_path = out_path
+    train(dataset, opt, pipes, gaussians=gaussians, gt_gaussians=gt_gaussians, prev_iters=prev_iters)
+
 def seg_demo(st_path=None, ed_path=None, thresh=None):
+    def get_rgb_form_displacement(disp: torch.Tensor):
+        disp = torch.log(1 + 100 * disp + 1e-20) / torch.log(torch.as_tensor(1 + 100))
+        r = torch.clamp(disp, 0., 1.)
+        g = torch.clamp(1. - disp, 0., 1.)
+        b = torch.clamp(.5 * disp, 0., 1.)
+        rgb_tensor = torch.stack((r, g, b), dim=-1)
+        return rgb_tensor
+
     gaussians_st, gaussians_ed = get_two_gaussians(st_path, ed_path)
     displacements = (gaussians_ed.get_xyz - gaussians_st.get_xyz).norm(dim=1)
     normalized_displacements = displacements / torch.max(displacements)
@@ -132,57 +177,28 @@ def seg_demo(st_path=None, ed_path=None, thresh=None):
     gaussians_ed.hide_static(normalized_displacements, thresh)
     gaussians_ed.save_ply(os.path.join(ed_path, 'point_cloud/iteration_2/point_cloud.ply'))
 
-def train_one(path, data_path):
-    dataset, pipes, opt = get_default_args()
-    safe_state(False)
-    torch.autograd.set_detect_anomaly(False)
+def deform_demo(st_path, ed_path):
+    gaussians_st, gaussians_ed = get_two_gaussians(st_path, ed_path)
+    displacements = (gaussians_ed.get_xyz - gaussians_st.get_xyz).norm(dim=1)
+    normalized_displacements = displacements / torch.max(displacements)
+    thresh = otsu_with_peak_filtering(normalized_displacements.detach().cpu().numpy())
+    mask = normalized_displacements > thresh
 
-    dataset.eval = True
-    dataset.sh_degree = 0
-    gaussians = GaussianModel(dataset.sh_degree)
-    dataset.source_path = os.path.realpath(data_path)
-    dataset.model_path = path
-    train(dataset, opt, pipes, gaussians=gaussians, prev_iters=0)
+    am = ArticulationModel(gaussians_st)
+    am.get_t = am.get_t + torch.tensor([0.5, 0, 0], dtype=torch.float, device='cuda')
+    gaussians_deformed = am.deform(mask)
+    gaussians_deformed.save_ply(os.path.join(st_path, 'point_cloud/iteration_3/point_cloud.ply'))
 
-def train_from_st(out_path, st_path, gt_path=None, data_path='data/USB100109/'):
-    dataset, pipes, opt = get_default_args()
-    model_params, prev_iters = torch.load(os.path.join(st_path, 'chkpnt.pth'))
-    gaussians = GaussianModel(dataset.sh_degree).restore(model_params, opt)
-
-    gaussians.initialize_neighbors(num_knn=20, lambda_omega=20)
-
-    gt_gaussians = None
-    if gt_path is not None:
-        model_params, _ = torch.load(os.path.join(gt_path, 'chkpnt.pth'))
-        gt_gaussians = GaussianModel(dataset.sh_degree).restore(model_params, opt)
-
-    safe_state(False)
-    torch.autograd.set_detect_anomaly(False)
-    dataset.eval = True
-    dataset.sh_degree = 0
-
-    opt.densify_until_iter = 0
-    opt.feature_lr = 0
-    opt.opacity_lr = 0
-    opt.scaling_lr = 0
-    # opt.rigid_weight = 1
-    # opt.rot_weight = .1
-    opt.iso_weight = 10
-    opt.cd_weight = 0.4
-    opt.cd_until_iter = 10_000
-    dataset.source_path = os.path.realpath(os.path.join(data_path, 'end'))
-    dataset.model_path = out_path
-    train(dataset, opt, pipes, gaussians=gaussians, gt_gaussians=gt_gaussians, prev_iters=prev_iters)
+def joint_params_optim_demo():
+    pass
 
 if __name__ == '__main__':
     st = 'output/st'
     ed = 'output/ed-1_01_1-c20-u10k'
     # train_from_st(out_path=ed, st_path=st, gt_path='output/ed')
-    seg_demo(st, ed, thresh=None)
+    # seg_demo(st, ed, thresh=None)
+    deform_demo(st, ed)
 
-    # train_one('output/blade_st', 'data/blade103706/start')
-    # train_one('output/blade_ed', 'data/blade103706/end')
-    # train_from_st(
-    #     out_path='output/blade_ed-iso1-c40-u10k', st_path='output/blade_st', gt_path='output/blade_ed',
-    #     data_path='data/blade103706')
-    # seg_demo(st_path='output/blade_st', ed_path='output/blade_ed-iso1-c40-u10k', thresh=None)
+    # train_from_st(out_path='output/ed-1_01_1-c20-u10k', st_path='output/st', gt_path='output/ed')
+    # seg_demo('output/st', 'output/ed-1_01_1-c20-u10k', thresh=0.45)
+
