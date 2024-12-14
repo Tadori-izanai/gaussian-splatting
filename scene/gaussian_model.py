@@ -277,6 +277,7 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
+        return self
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -436,7 +437,6 @@ class GaussianModel:
         self._scaling.requires_grad_(False)
         self._rotation.requires_grad_(False)
         self._opacity.requires_grad_(False)
-
         self.optimizer = None
 
     def training_se3_setup(self, training_args):
@@ -451,6 +451,11 @@ class GaussianModel:
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+
+    def enable_se3_grads(self):
+        self._xyz.requires_grad_(True)
+        self._rotation.requires_grad_(True)
+
 
     def size(self):
         return len(self._xyz)
