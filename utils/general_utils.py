@@ -186,6 +186,51 @@ def mat2quat(m):
         z = 0.25 * s
     return torch.tensor([w, x, y, z])
 
+def mat2quat_batch(m):
+    # 计算 trace，得到的 t 是 (B,)
+    t = torch.sum(torch.diagonal(m, dim1=-2, dim2=-1), dim=-1)
+
+    # 初始化 w, x, y, z 为零
+    w = torch.zeros(m.shape[0], device=m.device)
+    x = torch.zeros(m.shape[0], device=m.device)
+    y = torch.zeros(m.shape[0], device=m.device)
+    z = torch.zeros(m.shape[0], device=m.device)
+
+    # 如果 t > 0
+    mask = t > 0
+    s = torch.sqrt(1.0 + t) * 2
+    w[mask] = 0.25 * s[mask]
+    x[mask] = (m[mask, 2, 1] - m[mask, 1, 2]) / s[mask]
+    y[mask] = (m[mask, 0, 2] - m[mask, 2, 0]) / s[mask]
+    z[mask] = (m[mask, 1, 0] - m[mask, 0, 1]) / s[mask]
+
+    # 如果 m[0, 0] > m[1, 1] 和 m[0, 0] > m[2, 2]
+    mask_1 = (m[:, 0, 0] > m[:, 1, 1]) & (m[:, 0, 0] > m[:, 2, 2])
+    s_1 = torch.sqrt(1.0 + m[mask_1, 0, 0] - m[mask_1, 1, 1] - m[mask_1, 2, 2]) * 2
+    w[mask_1] = (m[mask_1, 2, 1] - m[mask_1, 1, 2]) / s_1
+    x[mask_1] = 0.25 * s_1
+    y[mask_1] = (m[mask_1, 0, 1] + m[mask_1, 1, 0]) / s_1
+    z[mask_1] = (m[mask_1, 0, 2] + m[mask_1, 2, 0]) / s_1
+
+    # 如果 m[1, 1] > m[2, 2]
+    mask_2 = m[:, 1, 1] > m[:, 2, 2]
+    s_2 = torch.sqrt(1.0 + m[mask_2, 1, 1] - m[mask_2, 0, 0] - m[mask_2, 2, 2]) * 2
+    w[mask_2] = (m[mask_2, 0, 2] - m[mask_2, 2, 0]) / s_2
+    x[mask_2] = (m[mask_2, 0, 1] + m[mask_2, 1, 0]) / s_2
+    y[mask_2] = 0.25 * s_2
+    z[mask_2] = (m[mask_2, 1, 2] + m[mask_2, 2, 1]) / s_2
+
+    # 如果 m[2, 2] 是最大元素
+    mask_3 = ~mask & ~mask_1 & ~mask_2
+    s_3 = torch.sqrt(1.0 + m[mask_3, 2, 2] - m[mask_3, 0, 0] - m[mask_3, 1, 1]) * 2
+    w[mask_3] = (m[mask_3, 1, 0] - m[mask_3, 0, 1]) / s_3
+    x[mask_3] = (m[mask_3, 0, 2] + m[mask_3, 2, 0]) / s_3
+    y[mask_3] = (m[mask_3, 1, 2] + m[mask_3, 2, 1]) / s_3
+    z[mask_3] = 0.25 * s_3
+
+    # 返回四元数 [w, x, y, z]
+    return torch.stack([w, x, y, z], dim=1)
+
 def otsu_with_peak_filtering(data, std_multiplier=3, bins=256):
     """
     使用主峰截取后再应用 Otsu 方法计算阈值。
