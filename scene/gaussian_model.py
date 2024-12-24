@@ -136,7 +136,15 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
-    
+
+    @property
+    def get_opacity_raw(self):
+        return self._opacity
+
+    @get_opacity_raw.setter
+    def get_opacity_raw(self, value):
+        self._opacity = value
+
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
@@ -456,7 +464,6 @@ class GaussianModel:
         self._xyz.requires_grad_(True)
         self._rotation.requires_grad_(True)
 
-
     def size(self):
         return len(self._xyz)
 
@@ -482,3 +489,14 @@ class GaussianModel:
     def hide_static(self, dist, threshold):
         with torch.no_grad():
             self._opacity[dist < threshold] = -1e514
+
+    def duplicate(self):
+        self._xyz = torch.cat([self._xyz, self._xyz])
+        self._features_dc = torch.cat([self._features_dc, self._features_dc])
+        self._features_rest = torch.cat([self._features_rest, self._features_rest])
+        self._opacity = torch.cat([self._opacity, self._opacity])
+        self._scaling = torch.cat([self._scaling, self._scaling])
+        self._rotation = torch.cat([self._rotation, self._rotation])
+
+    def op_grad(self):
+        return self._opacity.grad
