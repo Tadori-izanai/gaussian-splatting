@@ -67,27 +67,23 @@ class ArticulationModelLite:
         self.pipe = GroupParams()
         self.setup_function()
 
+    @staticmethod
+    def gram_schmidt(a1: torch.tensor, a2: torch.tensor) -> torch.tensor:
+        eps = 1e-11
+        norm_a1 = torch.norm(a1)
+        assert norm_a1 > eps
+        b1 = a1 / norm_a1
+
+        b2 = a2 - torch.dot(b1, a2) * b1
+        norm_b2 = torch.norm(b2)
+        assert norm_b2 > eps
+        b2 = b2 / norm_b2
+
+        b3 = torch.linalg.cross(b1, b2)
+        return torch.cat([b1.view(3, 1), b2.view(3, 1), b3.view(3, 1)], dim=1)
+
     def setup_function(self):
-        def gram_schmidt(a1: torch.tensor, a2: torch.tensor) -> torch.tensor:
-            if a1.dim() == 1:
-                a1 = a1.unsqueeze(0)
-                a2 = a2.unsqueeze(0)
-
-            norm_a1 = torch.norm(a1, dim=1, keepdim=True)
-            assert torch.all(norm_a1 > 0), "a1 contains zero vectors"
-            b1 = a1 / norm_a1
-
-            dot_product = torch.sum(b1 * a2, dim=1, keepdim=True)
-            b2 = a2 - dot_product * b1
-            norm_b2 = torch.norm(b2, dim=1, keepdim=True)
-            assert torch.all(norm_b2 > 0), "a2 is not linearly independent of a1"
-            b2 = b2 / norm_b2
-
-            b3 = torch.cross(b1, b2, dim=1)
-            result = torch.cat([b1.unsqueeze(2), b2.unsqueeze(2), b3.unsqueeze(2)], dim=2)
-            return result.squeeze(0) if result.shape[0] == 1 else result
-
-        self.r_activation = gram_schmidt
+        self.r_activation = self.gram_schmidt
         self.gaussians.cancel_grads()
         self.original_xyz = self.gaussians.get_xyz.clone().detach()
         self.original_rotation = self.gaussians.get_rotation.clone().detach()
@@ -201,20 +197,28 @@ class ArticulationModelLite:
                     self.gaussians.get_rotation_raw = self.gaussians.get_rotation_raw.detach()
                     self.gaussians.get_opacity_raw = self.gaussians.get_opacity_raw.detach()
                     # to prevent zero norm of column_vec1
-                    r = self.get_r
-                    self._column_vec1[:] = r[:, 0]
-                    self._column_vec2[:] = r[:, 1]
+                    # r = self.get_r
+                    # self._column_vec1[:] = r[:, 0]
+                    # self._column_vec2[:] = r[:, 1]
             self._show_losses(i, losses)
         progress_bar.close()
         return self.get_t, self.get_r
 
-class ArticulationModelVersion2(ArticulationModelLite):
+class ArticulationModel(ArticulationModelLite):
     def setup_args_extra(self):
         self.opt.iterations = 15000
+
+        # self.opt.column_lr = 0.005
+        self.opt.column_lr = 0.005
+        # self.opt.t_lr = 0.00005
+        # self.opt.t_lr = 0.00002
+
         self.opt.prob_lr = 0.05
-        self.opt.cd_weight = 0.5
-        # self.opt.bce_weight = 0.05
+
+        # self.opt.cd_weight = 0.5
+        self.opt.cd_weight = 1.0
         self.opt.bce_weight = None
+        # self.opt.bce_weight = 0.001
 
     def __init__(self, gaussians: GaussianModel):
         super().__init__(gaussians)
@@ -265,6 +269,10 @@ class ArticulationModelVersion2(ArticulationModelLite):
         print(loss_msg)
         print('t:', self.get_t.detach().cpu().numpy())
         print('r:', self.get_r.detach().cpu().numpy())
+        print('_column_vec1:', self._column_vec1.detach().cpu().numpy())
+        print('_column_vec2:', self._column_vec2.detach().cpu().numpy())
+        print('min val in self.get_prob:', torch.min(self.get_prob).detach().cpu().numpy())
+        print('max val in self.get_prob:', torch.max(self.get_prob).detach().cpu().numpy())
         if iteration in [2000, 4000, 8000, 15000]:
             self.gaussians.save_ply(
                 os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration}/point_cloud.ply')
@@ -287,10 +295,12 @@ class ArticulationModelVersion2(ArticulationModelLite):
         return loss, losses
 
     def _eval_bce_loss(self):
+        eps = 1e-5      # cannot be smaller
         p = self.get_prob
+        p = torch.clamp(p, min=eps, max=1 - eps)
         return torch.nn.functional.binary_cross_entropy(p, p, reduction='mean')
 
-class ArticulationModel(ArticulationModelLite):
+class ArticulationModel0(ArticulationModelLite):
     def setup_args_extra(self):
         self.opt.iterations = 30_000
         # self.opt.column_lr = 0.005
@@ -305,6 +315,26 @@ class ArticulationModel(ArticulationModelLite):
         self.opt.cd_weight = 0.2
         self.opt.rigid_r_weight = 100
         self.opt.rigid_t_weight = 100
+
+    @staticmethod
+    def gram_schmidt(a1: torch.tensor, a2: torch.tensor) -> torch.tensor:
+        if a1.dim() == 1:
+            a1 = a1.unsqueeze(0)
+            a2 = a2.unsqueeze(0)
+
+        norm_a1 = torch.norm(a1, dim=1, keepdim=True)
+        assert torch.all(norm_a1 > 0), "a1 contains zero vectors"
+        b1 = a1 / norm_a1
+
+        dot_product = torch.sum(b1 * a2, dim=1, keepdim=True)
+        b2 = a2 - dot_product * b1
+        norm_b2 = torch.norm(b2, dim=1, keepdim=True)
+        assert torch.all(norm_b2 > 0), "a2 is not linearly independent of a1"
+        b2 = b2 / norm_b2
+
+        b3 = torch.cross(b1, b2, dim=1)
+        result = torch.cat([b1.unsqueeze(2), b2.unsqueeze(2), b3.unsqueeze(2)], dim=2)
+        return result.squeeze(0) if result.shape[0] == 1 else result
 
     def __init__(self, gaussians: GaussianModel):
         super().__init__(gaussians)

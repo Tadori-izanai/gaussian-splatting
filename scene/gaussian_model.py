@@ -446,6 +446,7 @@ class GaussianModel:
         self._rotation.requires_grad_(False)
         self._opacity.requires_grad_(False)
         self.optimizer = None
+        return self
 
     def training_se3_setup(self, training_args):
         # self._xyz.requires_grad_(False)

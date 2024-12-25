@@ -23,7 +23,7 @@ from train import prepare_output_and_logger
 from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses
 from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid
-from scene.articulation_model import ArticulationModelLite, ArticulationModel, ArticulationModelVersion2
+from scene.articulation_model import ArticulationModelLite, ArticulationModel0, ArticulationModel
 
 def train(dataset, opt, pipe, gaussians=None, gt_gaussians=None, prev_iters=0):
     _ = prepare_output_and_logger(dataset)
@@ -197,7 +197,7 @@ def seg_demo(st_path=None, ed_path=None, thresh=None):
 def deform_demo(st_path, ed_path):
     gaussians_st, gaussians_ed, mask = get_two_gaussians(st_path, ed_path, from_chk=False)
     # am = ArticulationModelLite(gaussians_st)
-    am = ArticulationModel(gaussians_st)
+    am = ArticulationModel0(gaussians_st)
     am.get_t = torch.tensor([-.344, 0, 0], dtype=torch.float, device='cuda')
     am.get_r = torch.tensor([[ 1, 1, 0], [0, 1, 0]], dtype=torch.float, device='cuda')
     gaussians_deformed = am.deform(mask)
@@ -215,12 +215,20 @@ def joint_optim_demo(st_path, ed_path, gt_path, data_path='data/USB100109/'):
     # gaussians_deformed = am.deform(mask)
     # gaussians_deformed.save_ply(os.path.join(ed_path, 'point_cloud/iteration_3/point_cloud.ply'))
 
-def am2_seg(st_path: str, out_path: str):
+def am2_seg(st_path: str, out_path: str, thresh=.85):
     prob = np.load(os.path.join(out_path, 'prob.npy'))
-    gaussians_st = GaussianModel(0).load_ply(os.path.join(st_path, 'point_cloud/iteration_30000/point_cloud.ply'))
-    gaussians_st.cancel_grads()
-    gaussians_st.get_opacity_raw[prob < .5] = -1e514
+
+    gaussians_st = GaussianModel(0).load_ply(os.path.join(st_path, 'point_cloud/iteration_30000/point_cloud.ply')).cancel_grads()
+    gaussians_st.get_opacity_raw[prob < thresh] = -1e514
     gaussians_st.save_ply(os.path.join(out_path, 'point_cloud/iteration_2/point_cloud.ply'))
+
+    gaussians_st = GaussianModel(0).load_ply(os.path.join(st_path, 'point_cloud/iteration_30000/point_cloud.ply')).cancel_grads()
+    gaussians_st.get_opacity_raw[prob > thresh] = -1e514
+    gaussians_st.save_ply(os.path.join(out_path, 'point_cloud/iteration_3/point_cloud.ply'))
+
+    plt.figure()
+    plt.hist(prob, bins=100)
+    plt.savefig(os.path.join(out_path, 'disp-dist.png'))
 
 def optim_demo(st_path, ed_path, gt_path, data_path):
     os.makedirs(ed_path, exist_ok = True)
@@ -230,8 +238,8 @@ def optim_demo(st_path, ed_path, gt_path, data_path):
     gaussians_st = GaussianModel(0).restore(model_params, opt)
     gaussians_gt = GaussianModel(0).load_ply(os.path.join(gt_path, 'point_cloud/iteration_30000/point_cloud.ply'))
 
-    # am = ArticulationModel(gaussians_st)
-    am = ArticulationModelVersion2(gaussians_st)
+    # am = ArticulationModel0(gaussians_st)
+    am = ArticulationModel(gaussians_st)
     am.dataset.eval = True
     am.dataset.source_path = os.path.join(os.path.realpath(data_path), 'end')
     am.dataset.model_path = ed_path
@@ -257,9 +265,10 @@ if __name__ == '__main__':
     # gt = 'output/ed'
     # out = 'output/trained_ed-v2'
     # optim_demo(st, out, gt, data_path='data/USB100109')
+    # am2_seg(st, out, thresh=.9)
 
     st = 'output/blade_st'
     gt = 'output/blade_ed'
     out = 'output/blade_trained_v2'
-    # optim_demo(st, out, gt, data_path='data/blade103706')
-    am2_seg(st, out)
+    optim_demo(st, out, gt, data_path='data/blade103706')
+    # am2_seg(st, out, thresh=.9)
