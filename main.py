@@ -17,6 +17,7 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+import json
 import matplotlib.pyplot as plt
 import numpy as np
 from train import prepare_output_and_logger
@@ -24,7 +25,7 @@ from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses
 from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid
 from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
-from scene.art_models import ArticulationModel, ArticulationModel0
+from scene.art_models import ArticulationModel
 
 def train(dataset, opt, pipe, gaussians=None, gt_gaussians=None, prev_iters=0):
     _ = prepare_output_and_logger(dataset)
@@ -90,7 +91,7 @@ def train(dataset, opt, pipe, gaussians=None, gt_gaussians=None, prev_iters=0):
     progress_bar.close()
     torch.save((gaussians.capture(), opt.iterations), os.path.join(scene.model_path, 'chkpnt.pth'))
 
-def get_gaussians(model_path, from_chk=True, iters=30000) -> GaussianModel:
+def get_gaussians(model_path, from_chk=True, iters=30003) -> GaussianModel:
     gaussians = GaussianModel(0)
     if from_chk:
         dataset, pipes, opt = get_default_args()
@@ -125,10 +126,39 @@ def get_two_gaussians(st_path, ed_path, from_chk=True, cancel_grad=True) -> tupl
     mask = normalized_displacements > thresh
     return gaussians_st, gaussians_ed, mask
 
-def show_change(st_path, ed_path):
-    gaussians_st, gaussians_ed, _ = get_two_gaussians(st_path, ed_path, from_chk=False)
-    print(gaussians_st.get_scaling[:5] - gaussians_ed.get_scaling[:5])
-    print(gaussians_st.get_opacity[:5] - gaussians_ed.get_opacity[:5])
+def print_motion_params(out_path: str):
+    t = np.load(os.path.join(out_path, 't_pre.npy'))
+    r = np.load(os.path.join(out_path, 'r_pre.npy'))
+    print('t:', t)
+    print('r:', r)
+
+def get_gt_motion_params(data_path: str):
+    r = np.eye(3)
+    t = np.zeros(3)
+
+    with open(os.path.join(data_path, 'trans.json'), 'r') as json_file:
+        trans = json.load(json_file)
+    trans_info = trans['trans_info']
+
+    if trans_info['type'] == 'translate':
+        direction = np.array(trans_info['axis']['d'])
+        distance = trans_info['translate']['r'] - trans_info['translate']['l']
+        t = direction * distance
+    elif trans_info['type'] == 'rotate':
+        c = np.array(trans_info['axis']['o'])
+        n = np.array(trans_info['axis']['d'])
+        n /= np.linalg.norm(n)
+        theta = (trans_info['rotate']['r'] - trans_info['rotate']['l']) / 180 * np.pi
+        r = np.eye(3) * np.cos(theta) + (1 - np.cos(theta)) * (n[:, np.newaxis] @ n[np.newaxis, :]) + np.sin(theta) * (
+            np.array([[0, -n[2], n[1]], [n[2], 0, -n[0]], [-n[1], n[0], 0]])
+        )
+        t = c - r @ c
+        r = r.T
+    else:
+        assert False
+    print('t:', t)
+    print('r:', r)
+    return t, r
 
 def train_one(path, data_path):
     dataset, pipes, opt = get_default_args()
@@ -207,8 +237,7 @@ def seg_demo(st_path=None, ed_path=None, thresh=None):
 
 def deform_demo(st_path, ed_path):
     gaussians_st, gaussians_ed, mask = get_two_gaussians(st_path, ed_path, from_chk=False)
-    # am = ArticulationModelLite(gaussians_st)
-    am = ArticulationModel0(gaussians_st, mask)
+    am = ArticulationModelBasic(gaussians_st)
     am.get_t = torch.tensor([-.344, 0, 0], dtype=torch.float, device='cuda')
     am.get_r = torch.tensor([[ 1, 1, 0], [0, 1, 0]], dtype=torch.float, device='cuda')
     gaussians_deformed = am.deform()
@@ -226,21 +255,25 @@ def motion_param_optim_demo(st_path, ed_path, gt_path, data_path='data/USB100109
 
     gaussians_deformed = am.deform()
     gaussians_deformed.save_ply(os.path.join(ed_path, 'point_cloud/iteration_3/point_cloud.ply'))
-    np.save(os.path.join(st_path, 't.npy'), t.detach().cpu().numpy())
-    np.save(os.path.join(st_path, 'r.npy'), r.detach().cpu().numpy())
-    np.save(os.path.join(st_path, 'mask_init.npy'), mask.cpu().numpy())
+    np.save(os.path.join(st_path, 't_pre.npy'), t.detach().cpu().numpy())
+    np.save(os.path.join(st_path, 'r_pre.npy'), r.detach().cpu().numpy())
+    np.save(os.path.join(st_path, 'mask_pre.npy'), mask.cpu().numpy())
 
-def final_joint_optim_demo(model_path: str, data_path='data/USB100109'):
-    t = np.load(os.path.join(model_path, 't.npy'))
-    r = np.load(os.path.join(model_path, 'r.npy'))
-    mask = torch.tensor(np.load(os.path.join(model_path, 'mask_init.npy')), device='cuda')
+def joint_optim_demo(model_path: str, data_path='data/USB100109', pre_path=None):
+    if pre_path is None:
+        pre_path = model_path
+    t = np.load(os.path.join(pre_path, 't_pre.npy'))
+    r = np.load(os.path.join(pre_path, 'r_pre.npy'))
+    mask = torch.tensor(np.load(os.path.join(pre_path, 'mask_pre.npy')), device='cuda')
 
     gaussians_st = get_gaussians(model_path, from_chk=True)
     am = ArticulationModelJoint(gaussians_st, data_path, model_path, mask)
     am.set_init_params(t, r)
-    am.train()
+    t, r = am.train()
 
     np.save(os.path.join(model_path, 'mask_final.npy'), am.mask.cpu().numpy())
+    np.save(os.path.join(model_path, 't_final.npy'), t.detach().cpu().numpy())
+    np.save(os.path.join(model_path, 'r_final.npy'), r.detach().cpu().numpy())
     gaussians_static = GaussianModel(0).load_ply(os.path.join(model_path, 'point_cloud/iteration_30000/point_cloud.ply')).cancel_grads()
     gaussians_static.get_opacity_raw[am.mask] = -1e514
     gaussians_static.save_ply(os.path.join(model_path, 'point_cloud/iteration_8/point_cloud.ply'))
@@ -248,66 +281,103 @@ def final_joint_optim_demo(model_path: str, data_path='data/USB100109'):
     gaussians_dynamic.get_opacity_raw[~am.mask] = -1e514
     gaussians_dynamic.save_ply(os.path.join(model_path, 'point_cloud/iteration_9/point_cloud.ply'))
 
-
-def am2_seg(st_path: str, out_path: str, thresh=.85):
+def am_seg(st_path: str, out_path: str, thresh=.85):
     prob = np.load(os.path.join(out_path, 'prob.npy'))
 
-    gaussians_st = GaussianModel(0).load_ply(os.path.join(st_path, 'point_cloud/iteration_30000/point_cloud.ply')).cancel_grads()
+    gaussians_st = get_gaussians(st_path).cancel_grads()
     gaussians_st.get_opacity_raw[prob < thresh] = -1e514
     gaussians_st.save_ply(os.path.join(out_path, 'point_cloud/iteration_2/point_cloud.ply'))
 
-    gaussians_st = GaussianModel(0).load_ply(os.path.join(st_path, 'point_cloud/iteration_30000/point_cloud.ply')).cancel_grads()
+    gaussians_st = get_gaussians(st_path).cancel_grads()
     gaussians_st.get_opacity_raw[prob > thresh] = -1e514
     gaussians_st.save_ply(os.path.join(out_path, 'point_cloud/iteration_3/point_cloud.ply'))
+
+    # gaussians_st = GaussianModel(0).load_ply(os.path.join(st_path, 'point_cloud/iteration_30003/point_cloud.ply')).cancel_grads()
+    # gaussians_st.get_opacity_raw[(prob > .6) | (prob < .4)] = -1e514
+    # gaussians_st.save_ply(os.path.join(out_path, 'point_cloud/iteration_5/point_cloud.ply'))
 
     plt.figure()
     plt.hist(prob, bins=100)
     plt.savefig(os.path.join(out_path, 'disp-dist.png'))
 
-def optim_demo(st_path, ed_path, gt_path, data_path):
-    os.makedirs(ed_path, exist_ok = True)
+def am_training_demo(st_path, out_path, gt_path, data_path, thresh=.85):
+    os.makedirs(out_path, exist_ok=True)
 
     dataset, pipes, opt = get_default_args()
     model_params, _ = torch.load(os.path.join(st_path, 'chkpnt.pth'))
     gaussians_st = GaussianModel(0).restore(model_params, opt)
     gaussians_gt = GaussianModel(0).load_ply(os.path.join(gt_path, 'point_cloud/iteration_30000/point_cloud.ply'))
 
-    # am = ArticulationModel0(gaussians_st)
     am = ArticulationModel(gaussians_st)
     am.dataset.eval = True
     am.dataset.source_path = os.path.join(os.path.realpath(data_path), 'end')
-    am.dataset.model_path = ed_path
+    am.dataset.model_path = out_path
+    t, r = am.train(gt_gaussians=gaussians_gt)
+
+    prob = am.get_prob.detach().cpu().numpy()
+    np.save(os.path.join(out_path, 'prob.npy'), prob)
+    np.save(os.path.join(out_path, 't_pre.npy'), t.detach().cpu().numpy())
+    np.save(os.path.join(out_path, 'r_pre.npy'), r.detach().cpu().numpy())
+    np.save(os.path.join(out_path, 'mask_pre.npy'), prob > thresh)
+
+def am_training_with_gt_motion(st_path, out_path, gt_path, data_path, thresh=.85):
+    gaussians_st = get_gaussians(st_path).cancel_grads()
+    gaussians_gt = get_gaussians(gt_path).cancel_grads()
+
+    am = ArticulationModel(gaussians_st)
+    am.set_init_params(*get_gt_motion_params(data_path))
+    am.dataset.eval = True
+    am.dataset.source_path = os.path.join(os.path.realpath(data_path), 'end')
+    am.dataset.model_path = out_path
+    am.cancel_se3_grads()
+    am.opt.cd_weight = None
     am.train(gt_gaussians=gaussians_gt)
-    np.save(os.path.join(ed_path, 'prob.npy'), am.get_prob.detach().cpu().numpy())
-    am2_seg(st_path, ed_path)
+
+    prob = am.get_prob.detach().cpu().numpy()
+    np.save(os.path.join(out_path, 'prob.npy'), prob)
+    np.save(os.path.join(out_path, 'mask.npy'), prob > thresh)
 
 if __name__ == '__main__':
+    # print_motion_params(out)
+    # get_gt_motion_params('data/USB100109')
+
+    #
+
     # st = 'output/st'
     # ed = 'output/ed-1_01_1-c20-u10k'
     # train_from_st(out_path=ed, st_path=st, gt_path='output/ed')
     # seg_demo(st, ed, thresh=None)
     # deform_demo(st, ed)
     # motion_param_optim_demo(st, ed, 'output/ed')
-    # final_joint_optim_demo(st, 'data/USB100109')
+    # joint_optim_demo(st, 'data/USB100109')
 
-    st = 'output/blade_st'
-    ed = 'output/blade_ed-iso1-c40-u10k'
+    # st = 'output/blade_st'
+    # ed = 'output/blade_ed-iso1-c40-u10k'
     # train_from_st(out_path=ed, st_path=st, gt_path='output/blade_ed', data_path='data/blade103706')
     # seg_demo(st, ed, thresh=None)
-    motion_param_optim_demo(st, ed, 'output/blade_ed', data_path='data/blade103706')
-    final_joint_optim_demo(st, 'data/blade103706')
+    # motion_param_optim_demo(st, ed, 'output/blade_ed', data_path='data/blade103706')
+    # joint_optim_demo(st, 'data/blade103706')
 
+    #
 
     # st = 'output/st'
     # gt = 'output/ed'
     # out = 'output/trained_ed-v2'
-    # optim_demo(st, out, gt, data_path='data/USB100109')
-    # am2_seg(st, out, thresh=.9)
+    # am_training_demo(st, out, gt, data_path='data/USB100109')
+    # am_seg(st, out, thresh=.85)
+    # joint_optim_demo('output/st-art', data_path='data/USB100109', pre_path=out)
+
+    # am_training_with_gt_motion(st, 'output/usb-gt_motion', gt, data_path='data/USB100109')
+    # am_seg(st, 'output/usb-gt_motion')
 
     # st = 'output/blade_st'
     # gt = 'output/blade_ed'
     # out = 'output/blade_trained_v2'
-    # optim_demo(st, out, gt, data_path='data/blade103706')
-    # am2_seg(st, out, thresh=.9)
+    # am_training_demo(st, out, gt, data_path='data/blade103706')
+    # am_seg(st, out, thresh=.85)
+    # joint_optim_demo('output/blade_st-art', data_path='data/blade103706', pre_path=out)
+
+    # am_training_with_gt_motion(st, 'output/blade-gt_motion', gt, data_path='data/blade103706')
+    # am_seg(st, 'output/blade-gt_motion', thresh=.92)
 
     pass

@@ -73,7 +73,11 @@ class ArticulationModelBasic:
     def gram_schmidt(a1: torch.tensor, a2: torch.tensor) -> torch.tensor:
         eps = 1e-11
         norm_a1 = torch.norm(a1)
-        assert norm_a1 > eps
+        try:
+            assert norm_a1 > eps
+        except:
+            print(a1, a2)
+            exit(0)
         b1 = a1 / norm_a1
 
         b2 = a2 - torch.dot(b1, a2) * b1
@@ -116,6 +120,17 @@ class ArticulationModelBasic:
                 self._column_vec1 = value[0]
                 self._column_vec2 = value[1]
 
+    def set_init_params(self, t, r):
+        self._t = nn.Parameter(
+            torch.tensor(t, dtype=torch.float, device='cuda').requires_grad_(True)
+        )
+        self._column_vec1 = nn.Parameter(
+            torch.tensor(r[:, 0], dtype=torch.float, device='cuda').requires_grad_(True)
+        )
+        self._column_vec2 = nn.Parameter(
+            torch.tensor(r[:, 1], dtype=torch.float, device='cuda').requires_grad_(True)
+        )
+
     def training_setup(self, training_args):
         print(self.gaussians.spatial_lr_scale)
         l = [
@@ -126,8 +141,9 @@ class ArticulationModelBasic:
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
     def deform(self):
-        # if self.mask is None:
-        #     self.mask = torch.ones(self.gaussians.size(), dtype=torch.bool)
+        """
+        Actually, we use the inverse (or transpose) of the rotation matrix
+        """
         r = self.get_r
         r_inv_quat = mat2quat(r.transpose(1, 0))
         self.gaussians.get_xyz[self.mask] = torch.matmul(self.original_xyz[self.mask], r) + self.get_t
@@ -187,6 +203,9 @@ class ArticulationModelBasic:
             gt_image = viewpoint_cam.original_image.cuda()
 
             loss, losses = self._eval_losses(image, gt_image, self.gaussians, gt_gaussians)
+            if torch.isnan(loss).any() or torch.isinf(loss).any():
+                print("Loss has NaN or inf values")
+                exit(0)
             loss.backward()
             with torch.no_grad():
                 ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -194,16 +213,17 @@ class ArticulationModelBasic:
                     progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
                     progress_bar.update(10)
 
+                # # to prevent zero norm of column_vec1
+                # r = self.get_r.detach()
+                # self._column_vec1[:] = r[:, 0]
+                # self._column_vec2[:] = r[:, 1]
+                # #####
                 if i < iterations:
                     self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.gaussians.get_xyz = self.gaussians.get_xyz.detach()
                     self.gaussians.get_rotation_raw = self.gaussians.get_rotation_raw.detach()
                     self.gaussians.get_opacity_raw = self.gaussians.get_opacity_raw.detach()
-                    # to prevent zero norm of column_vec1
-                    # r = self.get_r
-                    # self._column_vec1[:] = r[:, 0]
-                    # self._column_vec2[:] = r[:, 1]
             self._show_losses(i, losses)
         progress_bar.close()
         return self.get_t, self.get_r
@@ -238,17 +258,6 @@ class ArticulationModelJoint(ArticulationModelBasic):
         self.model_path = model_path
         self.dataset_st = GroupParams()    # self.dataset is ed
         self.setup_args_extra()
-
-    def set_init_params(self, t, r):
-        self._t = nn.Parameter(
-            torch.tensor(t, dtype=torch.float, device='cuda').requires_grad_(True)
-        )
-        self._column_vec1 = nn.Parameter(
-            torch.tensor(r[:, 0], dtype=torch.float, device='cuda').requires_grad_(True)
-        )
-        self._column_vec2 = nn.Parameter(
-            torch.tensor(r[:, 1], dtype=torch.float, device='cuda').requires_grad_(True)
-        )
 
     @override
     def deform(self):
@@ -344,6 +353,7 @@ class ArticulationModelJoint(ArticulationModelBasic):
                     self.canonical_gaussians.optimizer.zero_grad(set_to_none=False)
             self._show_losses(i, losses)
         progress_bar.close()
+        return self.get_t, self.get_r
 
     @override
     def _show_losses(self, iteration: int, losses: dict):
