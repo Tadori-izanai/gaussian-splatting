@@ -107,6 +107,10 @@ def eval_iso_loss(gaussians: GaussianModel) -> torch.Tensor:
     curr_offset_mag = torch.sqrt((curr_offset ** 2).sum(-1) + 1e-20)
     return weighted_l2_loss_v1(curr_offset_mag, gaussians.neighbor_dist, gaussians.neighbor_weight)
 
+def eval_opacity_bce_loss(op: torch.tensor):
+    gt = (op > .5).float()
+    return F.binary_cross_entropy(op, gt, reduction='mean')
+
 def eval_losses(opt, iteration, image, gt_image, gaussians: GaussianModel=None, gt_gaussians: GaussianModel=None):
     losses = {
         'im': eval_img_loss(image, gt_image, opt),

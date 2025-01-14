@@ -18,6 +18,9 @@ from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
+import torch
+from random import randint
+
 class Scene:
 
     gaussians : GaussianModel
@@ -92,3 +95,33 @@ class Scene:
 
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]
+
+class BWScenes:
+    def __init__(self, dataset, gaussians, is_new_gaussians=True):
+        dataset.white_background = True
+        self.scene_white = Scene(dataset, gaussians, is_new_gaussian=is_new_gaussians)
+        dataset.white_background = False
+        self.scene_black = Scene(dataset, gaussians, is_new_gaussian=is_new_gaussians)
+        self.background_black = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
+        self.background_white = torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda")
+        self.viewpoint_stack_black = None
+        self.viewpoint_stack_white = None
+
+    def load_stack(self):
+        if not self.viewpoint_stack_black:
+            self.viewpoint_stack_black = self.scene_black.getTrainCameras().copy()
+        if not self.viewpoint_stack_white:
+            self.viewpoint_stack_white = self.scene_white.getTrainCameras().copy()
+
+    def pop_black(self):
+        self.load_stack()
+        viewpoint_cam = self.viewpoint_stack_black.pop(randint(0, len(self.viewpoint_stack_black) - 1))
+        return viewpoint_cam, self.background_black
+
+    def pop_white(self):
+        self.load_stack()
+        viewpoint_cam = self.viewpoint_stack_white.pop(randint(0, len(self.viewpoint_stack_white) - 1))
+        return viewpoint_cam, self.background_white
+
+    def get_cameras_extent(self):
+        return self.scene_black.cameras_extent
