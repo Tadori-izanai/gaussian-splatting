@@ -17,6 +17,8 @@ import random
 from scipy.spatial import KDTree
 from scipy.stats import gaussian_kde
 
+from pytorch3d.loss import chamfer_distance
+
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
 
@@ -231,7 +233,7 @@ def mat2quat_batch(m):
     # 返回四元数 [w, x, y, z]
     return torch.stack([w, x, y, z], dim=1)
 
-def otsu_with_peak_filtering(data, std_multiplier=3, bins=256):
+def otsu_with_peak_filtering(data, std_multiplier=3, bins=256, bias_factor=1.25):
     """
     使用主峰截取后再应用 Otsu 方法计算阈值。
 
@@ -243,6 +245,11 @@ def otsu_with_peak_filtering(data, std_multiplier=3, bins=256):
     返回:
         float: 计算得到的阈值。
     """
+    # 标准化
+    min_val = np.min(data)
+    max_val = np.max(data)
+    data = (data - min_val) / (max_val - min_val)
+
     # 密度估计
     density = gaussian_kde(data)
     x_vals = np.linspace(min(data), max(data), 1000)
@@ -292,7 +299,9 @@ def otsu_with_peak_filtering(data, std_multiplier=3, bins=256):
                 continue
 
             mean_fg = (total_mean - mean_bg) / weight_fg
-            between_class_variance = weight_bg * weight_fg * (mean_bg / weight_bg - mean_fg) ** 2
+            # between_class_variance = weight_bg * weight_fg * (mean_bg / weight_bg - mean_fg) ** 2
+            # 缩小两峰大小之间的差距
+            between_class_variance = weight_bg ** .5 * weight_fg ** .5 * (mean_bg / weight_bg - mean_fg) ** 2
 
             # 增加偏向大阈值的因子
             between_class_variance *= bin_centers[i] ** (bias_factor - 1)
@@ -303,8 +312,13 @@ def otsu_with_peak_filtering(data, std_multiplier=3, bins=256):
 
         return threshold
 
-    threshold = otsu_threshold_bias_towards_higher(filtered_data, bins)
+    threshold = otsu_threshold_bias_towards_higher(filtered_data, bins, bias_factor=bias_factor)
+    # 反标准化化
+    threshold = min_val + (max_val - min_val) * threshold
     return threshold
 
-
-
+def get_per_point_cd(gaussians_x, gaussians_y) -> torch.Tensor:
+    x = gaussians_x.get_xyz.unsqueeze(0)
+    y = gaussians_y.get_xyz.unsqueeze(0)
+    dist, _ = chamfer_distance(x, y, batch_reduction=None, point_reduction=None, single_directional=True)
+    return dist[0]

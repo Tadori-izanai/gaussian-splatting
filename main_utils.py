@@ -1,31 +1,15 @@
 import os
 import torch
-from random import randint
-from utils.loss_utils import l1_loss, ssim, eval_img_loss
 from gaussian_renderer import render, network_gui
-import sys
 from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
-import uuid
 from tqdm import tqdm
-from utils.image_utils import psnr
-from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams
-try:
-    from torch.utils.tensorboard import SummaryWriter
-    TENSORBOARD_FOUND = True
-except ImportError:
-    TENSORBOARD_FOUND = False
 
 import json
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
 from train import prepare_output_and_logger
 from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses, eval_img_loss, eval_opacity_bce_loss
-from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid
-from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
-from scene.art_models import ArticulationModel
 from scene import BWScenes
 
 def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None):
@@ -102,6 +86,11 @@ def print_motion_params(out_path: str):
     r = np.load(os.path.join(out_path, 'r_pre.npy'))
     print('t:', t)
     print('r:', r)
+
+def plot_hist(x: torch.Tensor, path: str):
+    plt.figure()
+    plt.hist(x.detach().cpu().numpy(), bins=100)
+    plt.savefig(path)
 
 def get_gt_motion_params(data_path: str):
     r = np.eye(3)

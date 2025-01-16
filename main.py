@@ -1,3 +1,4 @@
+import copy
 import os
 import torch
 from random import randint
@@ -23,11 +24,11 @@ import numpy as np
 from train import prepare_output_and_logger
 from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses
-from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid
+from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid, get_per_point_cd
 from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
 from scene.art_models import ArticulationModel
 
-from main_utils import *
+from main_utils import train_single, get_gaussians, print_motion_params, get_gt_motion_params, plot_hist
 
 def train_single_demo(path, data_path):
     dataset, pipes, opt = get_default_args()
@@ -41,6 +42,41 @@ def train_single_demo(path, data_path):
     dataset.model_path = path
     # train_single(dataset, opt, pipes, gaussians, bce_weight=0.01)
     train_single(dataset, opt, pipes, gaussians, bce_weight=None)
+
+def mask_init_demo(st_path, ed_path, out_path, data_path, thr=None):
+    os.makedirs(out_path, exist_ok=True)
+    dataset, pipes, opt = get_default_args()
+    dataset.eval = True
+    dataset.sh_degree = 0
+    dataset.source_path = os.path.realpath(os.path.join(data_path, 'start'))
+    dataset.model_path = out_path
+    _ = prepare_output_and_logger(dataset)
+    gaussians_st = get_gaussians(st_path, from_chk=True)
+    gaussians_ed = get_gaussians(ed_path, from_chk=True)
+    cds_st = get_per_point_cd(gaussians_st, gaussians_ed)
+    cds_st_normalized = cds_st / torch.max(cds_st)
+
+    eps = 1e-6
+    csn_is = inverse_sigmoid(torch.clamp(cds_st_normalized, eps, 1-eps))
+    if thr is None:
+        thr = otsu_with_peak_filtering(csn_is.detach().cpu().numpy(), bias_factor=1.25)
+        print(thr)
+    csn_shifted = torch.sigmoid((inverse_sigmoid(cds_st_normalized) - thr))
+
+    mask = (csn_shifted > 0.5).detach().cpu().numpy()
+
+    gaussians_m = copy.deepcopy(gaussians_st).cancel_grads()
+    gaussians_m.get_opacity_raw[~mask] = -1e514
+    gaussians_m.save_ply(os.path.join(out_path, 'point_cloud/iteration_2/point_cloud.ply'))
+    gaussians_s = copy.deepcopy(gaussians_st).cancel_grads()
+    gaussians_s.get_opacity_raw[mask] = -1e514
+    gaussians_s.save_ply(os.path.join(out_path, 'point_cloud/iteration_3/point_cloud.ply'))
+    plot_hist(cds_st_normalized, os.path.join(out_path, 'cdn.png'))
+    plot_hist(csn_is, os.path.join(out_path, 'cdn-is.png'))
+    plot_hist(csn_shifted, os.path.join(out_path, 'cdn-shifted.png'))
+    np.save(os.path.join(out_path, 'mask_pre.npy'), mask)
+    np.save(os.path.join(out_path, 'prob_pre.npy'), csn_shifted.detach().cpu().numpy())
+    return mask
 
 def joint_optim_demo(model_path: str, data_path='data/USB100109', pre_path=None):
     if pre_path is None:
@@ -121,17 +157,19 @@ def am_training_with_gt_motion(st_path, out_path, gt_path, data_path, thresh=.85
     np.save(os.path.join(out_path, 'mask.npy'), prob > thresh)
 
 if __name__ == '__main__':
-    st = 'output/usb_st'
-    ed = 'output/usb_ed'
-    data = 'data/USB100109'
-    train_single_demo(st, os.path.join(data, 'start'))
-    # train_single_demo(ed, os.path.join(data, 'end'))
+    # st = 'output/usb_st'
+    # ed = 'output/usb_ed'
+    # data = 'data/USB100109'
+    # out = 'output/usb-art'
 
-    # st = 'output/blade_st'
-    # ed = 'output/blade_ed'
-    # data = 'data/blade103706'
+    st = 'output/blade_st'
+    ed = 'output/blade_ed'
+    data = 'data/blade103706'
+    out = 'output/blade-art'
+
     # train_single_demo(st, os.path.join(data, 'start'))
     # train_single_demo(ed, os.path.join(data, 'end'))
+    mask_init_demo(st, ed, out, data, thr=None)
 
     #
 
