@@ -208,3 +208,59 @@ def motion_param_optim_demo(st_path, ed_path, gt_path, data_path='data/USB100109
     np.save(os.path.join(st_path, 't_pre.npy'), t.detach().cpu().numpy())
     np.save(os.path.join(st_path, 'r_pre.npy'), r.detach().cpu().numpy())
     np.save(os.path.join(st_path, 'mask_pre.npy'), mask.cpu().numpy())
+
+def am_seg(st_path: str, out_path: str, thresh=.85):
+    prob = np.load(os.path.join(out_path, 'prob.npy'))
+
+    gaussians_st = get_gaussians(st_path).cancel_grads()
+    gaussians_st.get_opacity_raw[prob < thresh] = -1e514
+    gaussians_st.save_ply(os.path.join(out_path, 'point_cloud/iteration_2/point_cloud.ply'))
+
+    gaussians_st = get_gaussians(st_path).cancel_grads()
+    gaussians_st.get_opacity_raw[prob > thresh] = -1e514
+    gaussians_st.save_ply(os.path.join(out_path, 'point_cloud/iteration_3/point_cloud.ply'))
+
+    # gaussians_st = GaussianModel(0).load_ply(os.path.join(st_path, 'point_cloud/iteration_30003/point_cloud.ply')).cancel_grads()
+    # gaussians_st.get_opacity_raw[(prob > .6) | (prob < .4)] = -1e514
+    # gaussians_st.save_ply(os.path.join(out_path, 'point_cloud/iteration_5/point_cloud.ply'))
+
+    plt.figure()
+    plt.hist(prob, bins=100)
+    plt.savefig(os.path.join(out_path, 'disp-dist.png'))
+
+def am_training_demo(st_path, out_path, gt_path, data_path, thresh=.85):
+    os.makedirs(out_path, exist_ok=True)
+
+    dataset, pipes, opt = get_default_args()
+    model_params, _ = torch.load(os.path.join(st_path, 'chkpnt.pth'))
+    gaussians_st = GaussianModel(0).restore(model_params, opt)
+    gaussians_gt = GaussianModel(0).load_ply(os.path.join(gt_path, 'point_cloud/iteration_30000/point_cloud.ply'))
+
+    am = ArticulationModel(gaussians_st)
+    am.dataset.eval = True
+    am.dataset.source_path = os.path.join(os.path.realpath(data_path), 'end')
+    am.dataset.model_path = out_path
+    t, r = am.train(gt_gaussians=gaussians_gt)
+
+    prob = am.get_prob.detach().cpu().numpy()
+    np.save(os.path.join(out_path, 'prob.npy'), prob)
+    np.save(os.path.join(out_path, 't_pre.npy'), t.detach().cpu().numpy())
+    np.save(os.path.join(out_path, 'r_pre.npy'), r.detach().cpu().numpy())
+    np.save(os.path.join(out_path, 'mask_pre.npy'), prob > thresh)
+
+def am_training_with_gt_motion(st_path, out_path, gt_path, data_path, thresh=.85):
+    gaussians_st = get_gaussians(st_path).cancel_grads()
+    gaussians_gt = get_gaussians(gt_path).cancel_grads()
+
+    am = ArticulationModel(gaussians_st)
+    am.set_init_params(*get_gt_motion_params(data_path))
+    am.dataset.eval = True
+    am.dataset.source_path = os.path.join(os.path.realpath(data_path), 'end')
+    am.dataset.model_path = out_path
+    am.cancel_se3_grads()
+    am.opt.cd_weight = None
+    am.train(gt_gaussians=gaussians_gt)
+
+    prob = am.get_prob.detach().cpu().numpy()
+    np.save(os.path.join(out_path, 'prob.npy'), prob)
+    np.save(os.path.join(out_path, 'mask.npy'), prob > thresh)

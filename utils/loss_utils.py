@@ -85,6 +85,12 @@ def eval_cd_loss(gaussians: GaussianModel, gt_gaussians: GaussianModel, n_sample
     dist1, _ = chamfer_distance(pts, gt_pts, batch_reduction=None)
     return dist1[0]
 
+def eval_cd_loss_sd(gaussians: GaussianModel, gt_gaussians: GaussianModel) -> torch.Tensor:
+    pts = gaussians.get_xyz.unsqueeze(0)
+    gt_pts = gt_gaussians.get_xyz.unsqueeze(0)
+    dist, _ = chamfer_distance(pts, gt_pts, batch_reduction=None)
+    return dist[0]
+
 def eval_rigid_loss(gaussians: GaussianModel) -> torch.Tensor:
     curr_rot = gaussians.get_rotation
     relative_rot = quat_mult(curr_rot, gaussians.prev_rotation_inv)
