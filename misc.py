@@ -264,3 +264,25 @@ def am_training_with_gt_motion(st_path, out_path, gt_path, data_path, thresh=.85
     prob = am.get_prob.detach().cpu().numpy()
     np.save(os.path.join(out_path, 'prob.npy'), prob)
     np.save(os.path.join(out_path, 'mask.npy'), prob > thresh)
+
+def final_joint_optim_demo(model_path: str, data_path='data/USB100109', pre_path=None):
+    if pre_path is None:
+        pre_path = model_path
+    t = np.load(os.path.join(pre_path, 't_pre.npy'))
+    r = np.load(os.path.join(pre_path, 'r_pre.npy'))
+    mask = torch.tensor(np.load(os.path.join(pre_path, 'mask_pre.npy')), device='cuda')
+
+    gaussians_st = get_gaussians(model_path, from_chk=True)
+    am = ArticulationModelJoint(gaussians_st, data_path, model_path, mask)
+    am.set_init_params(t, r)
+    t, r = am.train()
+
+    np.save(os.path.join(model_path, 'mask_final.npy'), am.mask.cpu().numpy())
+    np.save(os.path.join(model_path, 't_final.npy'), t.detach().cpu().numpy())
+    np.save(os.path.join(model_path, 'r_final.npy'), r.detach().cpu().numpy())
+    gaussians_static = GaussianModel(0).load_ply(os.path.join(model_path, 'point_cloud/iteration_30000/point_cloud.ply')).cancel_grads()
+    gaussians_static.get_opacity_raw[am.mask] = -1e514
+    gaussians_static.save_ply(os.path.join(model_path, 'point_cloud/iteration_8/point_cloud.ply'))
+    gaussians_dynamic = GaussianModel(0).load_ply(os.path.join(model_path, 'point_cloud/iteration_30000/point_cloud.ply')).cancel_grads()
+    gaussians_dynamic.get_opacity_raw[~am.mask] = -1e514
+    gaussians_dynamic.save_ply(os.path.join(model_path, 'point_cloud/iteration_9/point_cloud.ply'))

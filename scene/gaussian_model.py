@@ -489,7 +489,16 @@ class GaussianModel:
         self._scaling.requires_grad_(False)
         self._rotation.requires_grad_(False)
         self._opacity.requires_grad_(False)
-        self.optimizer = None
+        # self.optimizer = None
+        return self
+
+    def enable_grads(self):
+        self._xyz.requires_grad_(True)
+        self._features_dc.requires_grad_(True)
+        self._features_rest.requires_grad_(True)
+        self._scaling.requires_grad_(True)
+        self._rotation.requires_grad_(True)
+        self._opacity.requires_grad_(True)
         return self
 
     def training_se3_setup(self, training_args):

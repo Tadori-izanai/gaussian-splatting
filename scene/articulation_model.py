@@ -8,15 +8,16 @@ from torch import nn
 from tqdm import tqdm
 from random import randint
 import copy
+import math
 
 from typing_extensions import override
 
 from gaussian_renderer import render
 from arguments import GroupParams
 from scene.gaussian_model import GaussianModel
-from scene import Scene
+from scene import Scene, BWScenes
 from utils.general_utils import quat_mult, mat2quat, mat2quat_batch, inverse_sigmoid
-from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses
+from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd
 from train import prepare_output_and_logger
 
 class ArticulationModelBasic:
@@ -240,23 +241,31 @@ class ArticulationModelJoint(ArticulationModelBasic):
         self.dataset_st.eval = False
 
         self.dataset_st.source_path = os.path.join(os.path.realpath(self.data_path), 'start')
-        self.dataset.source_path = os.path.join(os.path.realpath(self.data_path), 'end')
+        self.dataset_ed.source_path = os.path.join(os.path.realpath(self.data_path), 'end')
         self.dataset_st.model_path = self.model_path
-        self.dataset.model_path = self.model_path
+        self.dataset_ed.model_path = self.model_path
 
-        self.opt.iterations = 30_000
-        self.opt.densification_interval = 100
-        self.opt.opacity_reset_interval = 3000
-        self.opt.densify_from_iter = 500
-        self.opt.densify_until_iter = 15_000
-        self.opt.densify_grad_threshold = 0.0002
+        # self.opt.iterations = 30_000
+        self.opt.iterations = 9_000
+        # self.opt.densification_interval = 100
+        self.opt.densification_interval = 50
+        # self.opt.opacity_reset_interval = 3000
+        self.opt.opacity_reset_interval = 1000
+        # self.opt.densify_from_iter = 500
+        self.opt.densify_from_iter = 100
+        # self.opt.densify_until_iter = 15_000
+        self.opt.densify_until_iter = 5_000
+
+        # self.opt.densify_grad_threshold = 0.0002
+        self.opt.densify_grad_threshold = 0.001
 
     def __init__(self, gaussians: GaussianModel, data_path: str, model_path: str, mask: torch.tensor=None):
         self.canonical_gaussians = copy.deepcopy(gaussians)
         super().__init__(gaussians, mask)
         self.data_path = data_path
         self.model_path = model_path
-        self.dataset_st = GroupParams()    # self.dataset is ed
+        self.dataset_st = GroupParams()
+        self.dataset_ed = self.dataset
         self.setup_args_extra()
 
     @override
@@ -282,36 +291,28 @@ class ArticulationModelJoint(ArticulationModelBasic):
     @override
     def train(self, gt_gaussians=None):
         iterations = self.opt.iterations
-        scene_st = Scene(self.dataset_st, self.gaussians, is_new_gaussian=False)
-        scene_ed = Scene(self.dataset, self.gaussians, is_new_gaussian=False)
+        bws_st = BWScenes(self.dataset_st, self.gaussians, is_new_gaussians=False)
+        bws_ed = BWScenes(self.dataset_ed, self.gaussians, is_new_gaussians=False)
         self.training_setup(self.opt)
 
-        background = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
-        viewpoint_stack_st = None
-        viewpoint_stack_ed = None
         ema_loss_for_log = 0.0
         progress_bar = tqdm(range(iterations), desc="Training progress")
-
         for i in range(1, iterations + 1):
             # Pick a random Camera from st and ed respectively
-            if not viewpoint_stack_st:
-                viewpoint_stack_st = scene_st.getTrainCameras().copy()
-            if not viewpoint_stack_ed:
-                viewpoint_stack_ed = scene_ed.getTrainCameras().copy()
-            viewpoint_cam_st = viewpoint_stack_st.pop(randint(0, len(viewpoint_stack_st) - 1))
-            viewpoint_cam_ed = viewpoint_stack_ed.pop(randint(0, len(viewpoint_stack_ed) - 1))
+            viewpoint_cam_st, background_st = bws_st.pop_black() if (i % 2 == 0) else bws_st.pop_white()
+            viewpoint_cam_ed, background_ed = bws_ed.pop_black() if (i % 2 == 0) else bws_ed.pop_white()
 
             self.deform()
 
             losses = {'app_st': None, 'app_ed': None}
 
-            render_pkg = render(viewpoint_cam_st, self.canonical_gaussians, self.pipe, background)
+            render_pkg = render(viewpoint_cam_st, self.canonical_gaussians, self.pipe, background_st)
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
                 render_pkg["visibility_filter"], render_pkg["radii"]
             gt_image = viewpoint_cam_st.original_image.cuda()
             losses['app_st'] = eval_img_loss(image, gt_image, self.opt)
 
-            render_pkg = render(viewpoint_cam_ed, self.gaussians, self.pipe, background)
+            render_pkg = render(viewpoint_cam_ed, self.gaussians, self.pipe, background_ed)
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
                 render_pkg["visibility_filter"], render_pkg["radii"]
             gt_image = viewpoint_cam_ed.original_image.cuda()
@@ -322,6 +323,7 @@ class ArticulationModelJoint(ArticulationModelBasic):
             # loss = losses['app_st'] + losses['app_ed']
             loss.backward()
             with torch.no_grad():
+                # Progress bar
                 ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
                 if i % 10 == 0:
                     progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
@@ -338,7 +340,7 @@ class ArticulationModelJoint(ArticulationModelBasic):
                     if i > self.opt.densify_from_iter and i % self.opt.densification_interval == 0:
                         size_threshold = 20 if i > self.opt.opacity_reset_interval else None
                         self.mask = self.canonical_gaussians.densify_and_prune(
-                            self.opt.densify_grad_threshold, 0.005, scene_st.cameras_extent, size_threshold,
+                            self.opt.densify_grad_threshold, 0.005, bws_st.get_cameras_extent(), size_threshold,
                             auxiliary_attr=self.mask
                         )
                     # opacity reset
@@ -357,15 +359,15 @@ class ArticulationModelJoint(ArticulationModelBasic):
 
     @override
     def _show_losses(self, iteration: int, losses: dict):
-        if iteration in [1000, 2000, 4000, 8000, 15000, 30000]:
+        if iteration in [1000, 5000, 9000]:
             self.canonical_gaussians.save_ply(
-                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration}/point_cloud.ply')
+                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration - 1}/point_cloud.ply')
             )
             self.gaussians.save_ply(
-                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration + 1}/point_cloud.ply')
+                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration - 2}/point_cloud.ply')
             )
 
-        if iteration not in [1, 20, 50, 200, 500, 1000, 2000, 4000, 5999, 8000, 8999, 16000, 30000]:
+        if iteration not in [1, 20, 50, 200, 500, 1000, 2000, 5000, 9000]:
             return
 
         loss_msg = f"\niteration {iteration}:"
@@ -376,5 +378,140 @@ class ArticulationModelJoint(ArticulationModelBasic):
         print('t:', self.get_t.detach().cpu().numpy())
         print('r:', self.get_r.detach().cpu().numpy())
         print('num_gaussians:', self.canonical_gaussians.size())
-        print('mean_oacity:', torch.mean(self.canonical_gaussians.get_opacity).detach().cpu().numpy())
+        print('mean_opacity:', torch.mean(self.canonical_gaussians.get_opacity).detach().cpu().numpy())
 
+class ArticulationModelJointCD(ArticulationModelJoint):
+    def __init__(self, gaussians: GaussianModel, data_path: str, model_path: str, mask: torch.tensor=None):
+        super().__init__(gaussians, data_path, model_path, mask)
+
+        self.opt.warmup_until_iter = 3000
+        self.opt.cd_from_iter = self.opt.warmup_until_iter + 1
+        # self.opt.cd_until_iter = 9000
+        self.opt.cd_until_iter = 7000
+
+        # self.opt.iterations = 30_000
+        self.opt.iterations = 20_000
+        self.opt.densification_interval = 100
+        self.opt.opacity_reset_interval = 3000
+        # self.opt.densify_from_iter = 500
+        self.opt.densify_from_iter = self.opt.cd_from_iter
+        self.opt.densify_until_iter = 15_000
+
+        # self.opt.densify_grad_threshold = 0.0002
+        self.opt.densify_grad_threshold = 0.001
+
+        self.opt.cd_weight = 5
+        self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
+        self.is_revolute = True
+
+    @override
+    def _show_losses(self, iteration: int, losses: dict):
+        if iteration in [3000, 7000, 20000]:
+            self.canonical_gaussians.save_ply(
+                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration - 1}/point_cloud.ply')
+            )
+            self.gaussians.save_ply(
+                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration - 2}/point_cloud.ply')
+            )
+
+        if iteration not in [1, 20, 50, 200, 500, 1000, 3000, 7000, 8999, 15000-1, 20000]:
+            return
+
+        loss_msg = f"\niteration {iteration}:"
+        for name, loss in losses.items():
+            if loss is None:
+                continue
+            loss_msg += f"  {name} {loss.item():.{7}f}"
+        print(loss_msg)
+        print('t:', self.get_t.detach().cpu().numpy())
+        print('r:', self.get_r.detach().cpu().numpy())
+        print('num_gaussians:', self.canonical_gaussians.size())
+        print('mean_opacity:', torch.mean(self.canonical_gaussians.get_opacity).detach().cpu().numpy())
+        print()
+
+    @override
+    def train(self, gt_gaussians=None):
+        iterations = self.opt.iterations
+        bws_st = BWScenes(self.dataset_st, self.gaussians, is_new_gaussians=False)
+        bws_ed = BWScenes(self.dataset_ed, self.gaussians, is_new_gaussians=False)
+        self.training_setup(self.opt)
+
+        self.canonical_gaussians.cancel_grads()
+
+        ema_loss_for_log = 0.0
+        progress_bar = tqdm(range(iterations), desc="Training progress")
+        for i in range(1, iterations + 1):
+            # Pick a random Camera from st and ed respectively
+            viewpoint_cam_st, background_st = bws_st.pop_black() if (i % 2 == 0) else bws_st.pop_white()
+            viewpoint_cam_ed, background_ed = bws_ed.pop_black() if (i % 2 == 0) else bws_ed.pop_white()
+
+            self.deform()
+
+            losses = {'app_st': None, 'app_ed': None, 'cd': None}
+            requires_cd = (self.opt.cd_from_iter <= i <= self.opt.cd_until_iter) and self.is_revolute
+
+            render_pkg = render(viewpoint_cam_ed, self.gaussians, self.pipe, background_ed)
+            image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
+                render_pkg["visibility_filter"], render_pkg["radii"]
+            gt_image = viewpoint_cam_ed.original_image.cuda()
+            losses['app_ed'] = eval_img_loss(image, gt_image, self.opt)
+
+            render_pkg = render(viewpoint_cam_st, self.canonical_gaussians, self.pipe, background_st)
+            image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
+                render_pkg["visibility_filter"], render_pkg["radii"]
+            gt_image = viewpoint_cam_st.original_image.cuda()
+            losses['app_st'] = eval_img_loss(image, gt_image, self.opt)
+
+            weight_st = losses['app_st'].detach() / (losses['app_st'].detach() + losses['app_ed'].detach())
+            loss = weight_st * losses['app_st'] + (1 - weight_st) * losses['app_ed']
+            if (gt_gaussians is not None) and requires_cd:
+                losses['cd'] = eval_cd_loss_sd(self.gaussians, gt_gaussians)
+                loss += self.opt.cd_weight * losses['cd']
+            loss.backward()
+
+            with torch.no_grad():
+                # Progress bar
+                ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+                if i % 10 == 0:
+                    progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                    progress_bar.update(10)
+
+                # Densification
+                if i < self.opt.densify_until_iter:
+                    # Keep track of max radii in image-space for pruning
+                    self.canonical_gaussians.max_radii2D[visibility_filter] = torch.max(
+                        self.canonical_gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
+                    )
+                    self.canonical_gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                    # copy or split
+                    if i > self.opt.densify_from_iter and i % self.opt.densification_interval == 0:
+                        size_threshold = 20 if i > self.opt.opacity_reset_interval else None
+                        self.mask = self.canonical_gaussians.densify_and_prune(
+                            self.opt.densify_grad_threshold, 0.005, bws_st.get_cameras_extent(), size_threshold,
+                            auxiliary_attr=self.mask
+                        )
+                    # opacity reset
+                    if i % self.opt.opacity_reset_interval == 0 or (
+                            self.dataset_st.white_background and i == self.opt.densify_from_iter):
+                        self.canonical_gaussians.reset_opacity()
+
+                if i < iterations:
+                    self.optimizer.step()
+                    self.canonical_gaussians.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    self.canonical_gaussians.optimizer.zero_grad(set_to_none=False)
+
+                if i == self.opt.warmup_until_iter:
+                    self.is_revolute = torch.trace(self.get_r) < self.opt.trace_r_thresh
+                    print('Detected **REVOLUTE**' if self.is_revolute else 'Detected **PRISMATIC**')
+                    if not self.is_revolute:
+                        self._column_vec1 = nn.Parameter(
+                            torch.tensor([1, 0, 0], dtype=torch.float, device='cuda').requires_grad_(False)
+                        )
+                        self._column_vec2 = nn.Parameter(
+                            torch.tensor([0, 1, 0], dtype=torch.float, device='cuda').requires_grad_(False)
+                        )
+                    self.canonical_gaussians.enable_grads()
+            self._show_losses(i, losses)
+        progress_bar.close()
+        return self.get_t, self.get_r
