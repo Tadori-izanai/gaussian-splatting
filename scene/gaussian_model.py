@@ -172,6 +172,42 @@ class GaussianModel:
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
+    def get_inverse_covariance(self, indices: torch.tensor):
+        """
+        Calculates the inverse of covariance matrix (with detached gaussian attributes)
+        :return: inv cov
+        """
+        scaling = self.get_scaling.detach()
+        rot_raw = self._rotation.detach()
+        L = build_scaling_rotation(1 / (scaling + 1e-8), rot_raw)
+        cov_inv = L @ L.transpose(1, 2)
+        return cov_inv[indices]
+
+    def eval_opacity_at(self, positions: torch.tensor, indices: torch.tensor):
+        """
+        Calculates the self's opacity at N positions (with detached gaussian attributes)
+        :param positions: has shape of (N, 3)
+        :param indices: has shape of (N, K)
+        :return: tensor of (N,)
+        """
+        centers = self.get_xyz[indices].detach()
+        opacities = self.get_opacity[:, 0][indices]             # (N, K)
+        cov_inv = self.get_inverse_covariance(indices)  # (N, K, 3, 3)
+        dist = positions.unsqueeze(1).detach() - centers         # (N, K, 3)
+        quad =  torch.einsum('nki,nkij,nkj->nk', dist, cov_inv, dist).clamp(max=16, min=-16)
+        opacities = opacities * torch.exp(-0.5 * quad)  # (N, K)
+        return torch.sum(opacities, dim=1)
+
+    def __getitem__(self, mask):
+        gaussians = GaussianModel(self.max_sh_degree)
+        gaussians._xyz = self._xyz[mask]
+        gaussians._features_dc = self._features_dc[mask]
+        gaussians._features_rest = self._features_rest[mask]
+        gaussians._scaling = self._scaling[mask]
+        gaussians._rotation = self._rotation[mask]
+        gaussians._opacity = self._opacity[mask]
+        return gaussians
+
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1

@@ -2,6 +2,9 @@ import copy
 import os
 import torch
 from random import randint
+
+from torch.nn.attention.bias import causal_upper_left
+
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
@@ -114,12 +117,9 @@ def joint_optim_demo(out_path: str, st_path: str, data_path: str):
     amj.set_init_params(t_pre, r_pre)
     t, r = amj.train()
 
-    gaussians_m = get_gaussians(out_path, from_chk=False, iters=8999).cancel_grads()
-    gaussians_m.get_opacity_raw[~amj.mask] = -1e514
-    gaussians_m.save_ply(os.path.join(out_path, 'point_cloud/iteration_5/point_cloud.ply'))
-    gaussians_s = get_gaussians(out_path, from_chk=False, iters=8998).cancel_grads()
-    gaussians_s.get_opacity_raw[amj.mask] = -1e514
-    gaussians_s.save_ply(os.path.join(out_path, 'point_cloud/iteration_6/point_cloud.ply'))
+    gaussians_canonical = get_gaussians(out_path, from_chk=False, iters=amj.opt.iterations - 1)
+    gaussians_canonical[amj.mask].save_ply(os.path.join(out_path, 'point_cloud/iteration_5/point_cloud.ply'))
+    gaussians_canonical[~amj.mask].save_ply(os.path.join(out_path, 'point_cloud/iteration_6/point_cloud.ply'))
     np.save(os.path.join(out_path, 'mask_final.npy'), amj.mask.cpu().numpy())
     np.save(os.path.join(out_path, 't_final.npy'), t.detach().cpu().numpy())
     np.save(os.path.join(out_path, 'r_final.npy'), r.detach().cpu().numpy())
@@ -144,23 +144,32 @@ def joint_optim_from_poor_init_demo(out_path: str, st_path: str, ed_path: str, d
     np.save(os.path.join(out_path, 'r_final.npy'), r.detach().cpu().numpy())
 
 if __name__ == '__main__':
-    st = 'output/usb_st'
-    ed = 'output/usb_ed'
-    data = 'data/USB100109'
-    out = 'output/usb-art'
-    #
+    # st = 'output/usb_st'
+    # ed = 'output/usb_ed'
+    # data = 'data/USB100109'
+    # out = 'output/usb-art'
+
     # st = 'output/blade_st'
     # ed = 'output/blade_ed'
     # data = 'data/blade103706'
     # out = 'output/blade-art'
 
+    st = 'output/storage_st'
+    ed = 'output/storage_ed'
+    data = 'data/storage45135'
+    out = 'output/storage-art'
+
+    # st = 'output/fridge_st'
+    # ed = 'output/fridge_ed'
+    # data = 'data/fridge10905'
+    # out = 'output/fridge-art'
+
     get_gt_motion_params(data)
 
-    # train_single_demo(st, os.path.join(data, 'start'))
-    # train_single_demo(ed, os.path.join(data, 'end'))
-    # mask_init_demo(out, st, ed, data, thr=None)
-    # am_optim_demo(out, st, ed, data)
-    # joint_optim_demo(out, st, data)
-    ## joint_optim_from_poor_init_demo(out, st, ed, data)
+    train_single_demo(st, os.path.join(data, 'start'))
+    train_single_demo(ed, os.path.join(data, 'end'))
+    mask_init_demo(out, st, ed, data, thr=None)
+    am_optim_demo(out, st, ed, data)
+    joint_optim_demo(out, st, data)
 
     pass

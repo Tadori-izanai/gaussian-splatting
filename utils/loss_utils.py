@@ -17,6 +17,7 @@ from math import exp
 from utils.general_utils import build_rotation, quat_mult, weighted_l2_loss_v2, weighted_l2_loss_v1
 from scene.gaussian_model import GaussianModel
 from pytorch3d.loss import chamfer_distance
+from pytorch3d.ops import knn_points
 
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
@@ -116,6 +117,21 @@ def eval_iso_loss(gaussians: GaussianModel) -> torch.Tensor:
 def eval_opacity_bce_loss(op: torch.tensor):
     gt = (op > .5).float()
     return F.binary_cross_entropy(op, gt, reduction='mean')
+
+def _eval_knn_opacities_collision_loss_helper(gaussians: GaussianModel, mask: torch.tensor, k=9):
+    gaussians_m = gaussians[mask]
+    gaussians_s = gaussians[~mask]
+    p1 = gaussians_m.get_xyz.detach().unsqueeze(0)
+    p2 = gaussians_s.get_xyz.detach().unsqueeze(0)
+    _, indices, _ = knn_points(p1, p2, K=k)
+    indices = indices[0]
+    opacities = gaussians_s.eval_opacity_at(gaussians_m.get_xyz, indices)
+    return torch.mean(opacities)
+
+def eval_knn_opacities_collision_loss(gaussians: GaussianModel, mask: torch.tensor, k=9):
+    loss1 = _eval_knn_opacities_collision_loss_helper(gaussians, mask, k)
+    loss2 = _eval_knn_opacities_collision_loss_helper(gaussians, ~mask, k)
+    return 0.5 * (loss1 + loss2)
 
 def eval_losses(opt, iteration, image, gt_image, gaussians: GaussianModel=None, gt_gaussians: GaussianModel=None):
     losses = {

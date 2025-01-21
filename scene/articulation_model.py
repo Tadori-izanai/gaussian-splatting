@@ -17,7 +17,8 @@ from arguments import GroupParams
 from scene.gaussian_model import GaussianModel
 from scene import Scene, BWScenes
 from utils.general_utils import quat_mult, mat2quat, mat2quat_batch, inverse_sigmoid
-from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd
+from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd, \
+    eval_knn_opacities_collision_loss, eval_opacity_bce_loss
 from train import prepare_output_and_logger
 
 class ArticulationModelBasic:
@@ -245,19 +246,28 @@ class ArticulationModelJoint(ArticulationModelBasic):
         self.dataset_st.model_path = self.model_path
         self.dataset_ed.model_path = self.model_path
 
-        # self.opt.iterations = 30_000
-        self.opt.iterations = 9_000
-        # self.opt.densification_interval = 100
-        self.opt.densification_interval = 50
-        # self.opt.opacity_reset_interval = 3000
-        self.opt.opacity_reset_interval = 1000
-        # self.opt.densify_from_iter = 500
-        self.opt.densify_from_iter = 100
-        # self.opt.densify_until_iter = 15_000
-        self.opt.densify_until_iter = 5_000
+        self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
+        self.opt.min_opacity = 0.005
 
-        # self.opt.densify_grad_threshold = 0.0002
-        self.opt.densify_grad_threshold = 0.001
+        # self.opt.iterations = 30_000
+        # self.opt.densification_interval = 100
+        # self.opt.opacity_reset_interval = 3000
+        # self.opt.densify_from_iter = 500
+        # self.opt.densify_until_iter = 15_000
+        self.opt.iterations = 9_000
+        self.opt.densification_interval = 50
+        self.opt.opacity_reset_interval = 2000
+        self.opt.densify_from_iter = 50
+        self.opt.densify_until_iter = 6_000
+
+        self.opt.densify_grad_threshold = 0.0002
+        # self.opt.densify_grad_threshold = 0.001
+
+        self.opt.collision_knn = 32
+        self.opt.collision_weight = 0.02
+        self.opt.collision_from_iter = 1
+        self.opt.collision_until_iter = 10000
+        self.opt.collision_after_reset_iter = 500
 
     def __init__(self, gaussians: GaussianModel, data_path: str, model_path: str, mask: torch.tensor=None):
         self.canonical_gaussians = copy.deepcopy(gaussians)
@@ -288,12 +298,33 @@ class ArticulationModelJoint(ArticulationModelBasic):
         self.gaussians.get_opacity_raw = self.canonical_gaussians.get_opacity_raw
         return self.gaussians
 
+    def translate_to(self, t=0.5):
+        canonical_xyz = self.canonical_gaussians.get_xyz
+        gaussians_half = GaussianModel(0)
+        gaussians_half.get_xyz = torch.zeros_like(canonical_xyz)
+        gaussians_half.get_xyz[:] = canonical_xyz
+        gaussians_half.get_xyz[self.mask] = canonical_xyz[self.mask] + self.get_t * t
+        gaussians_half.get_rotation_raw = self.canonical_gaussians.get_rotation_raw
+        gaussians_half.get_scaling_raw = self.canonical_gaussians.get_scaling_raw
+        gaussians_half.get_features_dc = self.canonical_gaussians.get_features_dc
+        gaussians_half.get_features_rest = self.canonical_gaussians.get_features_rest
+        gaussians_half.get_opacity_raw = self.canonical_gaussians.get_opacity_raw
+        return gaussians_half
+
     @override
     def train(self, gt_gaussians=None):
         iterations = self.opt.iterations
         bws_st = BWScenes(self.dataset_st, self.gaussians, is_new_gaussians=False)
         bws_ed = BWScenes(self.dataset_ed, self.gaussians, is_new_gaussians=False)
         self.training_setup(self.opt)
+
+        is_revolute = torch.trace(self.get_r) < self.opt.trace_r_thresh
+        print('Detected *REVOLUTE*' if is_revolute else 'Detected *PRISMATIC*')
+        self._column_vec1.requires_grad_(False)
+        self._column_vec2.requires_grad_(False)
+        self._t.requires_grad_(False)
+
+        prev_opacity_reset_iter = -114514
 
         ema_loss_for_log = 0.0
         progress_bar = tqdm(range(iterations), desc="Training progress")
@@ -304,7 +335,9 @@ class ArticulationModelJoint(ArticulationModelBasic):
 
             self.deform()
 
-            losses = {'app_st': None, 'app_ed': None}
+            losses = {'app_st': None, 'app_ed': None, 'collision': None, 'cd': None, 'bce': None}
+            requires_collision = (self.opt.collision_from_iter <= i <= self.opt.collision_until_iter)
+            requires_collision &= (i - prev_opacity_reset_iter >= self.opt.collision_after_reset_iter)
 
             render_pkg = render(viewpoint_cam_st, self.canonical_gaussians, self.pipe, background_st)
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
@@ -320,8 +353,11 @@ class ArticulationModelJoint(ArticulationModelBasic):
 
             weight_st = losses['app_st'].detach() / (losses['app_st'].detach() + losses['app_ed'].detach())
             loss = weight_st * losses['app_st'] + (1 - weight_st) * losses['app_ed']
-            # loss = losses['app_st'] + losses['app_ed']
+            if (self.opt.collision_weight is not None) and requires_collision:
+                losses['collision'] = eval_knn_opacities_collision_loss(self.gaussians, self.mask, k=self.opt.collision_knn)
+                loss += self.opt.collision_weight * losses['collision']
             loss.backward()
+
             with torch.no_grad():
                 # Progress bar
                 ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -347,6 +383,7 @@ class ArticulationModelJoint(ArticulationModelBasic):
                     if i % self.opt.opacity_reset_interval == 0 or (
                             self.dataset_st.white_background and i == self.opt.densify_from_iter):
                         self.canonical_gaussians.reset_opacity()
+                        prev_opacity_reset_iter = i
 
                 if i < iterations:
                     self.optimizer.step()
@@ -367,7 +404,11 @@ class ArticulationModelJoint(ArticulationModelBasic):
                 os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration - 2}/point_cloud.ply')
             )
 
-        if iteration not in [1, 20, 50, 200, 500, 1000, 2000, 5000, 9000]:
+        if iteration not in [1, 20, 50, 200, 500, 1000, 2000,
+                             3000, 4000,
+                             5000,
+                             6000, 7000, 8000,
+                             9000]:
             return
 
         loss_msg = f"\niteration {iteration}:"
@@ -379,6 +420,7 @@ class ArticulationModelJoint(ArticulationModelBasic):
         print('r:', self.get_r.detach().cpu().numpy())
         print('num_gaussians:', self.canonical_gaussians.size())
         print('mean_opacity:', torch.mean(self.canonical_gaussians.get_opacity).detach().cpu().numpy())
+        print()
 
 class ArticulationModelJointCD(ArticulationModelJoint):
     def __init__(self, gaussians: GaussianModel, data_path: str, model_path: str, mask: torch.tensor=None):
