@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import copy
 import torch
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
@@ -278,8 +279,15 @@ class GaussianModel:
         for i in range(self._rotation.shape[1]):
             l.append('rot_{}'.format(i))
         return l
+    
+    def save_ply(self, path, min_opacity=0.005, auxiliary_attr=None):
+        copy.deepcopy(self).save_ply_helper(path, min_opacity, auxiliary_attr)
 
-    def save_ply(self, path):
+    def save_ply_helper(self, path, min_opacity=0.005, auxiliary_attr=None):
+        # removes gaussians whose opacities is too small, ensuring the accuracy in final point cloud
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        auxiliary_attr = self.prune_points(prune_mask, auxiliary_attr=auxiliary_attr)
+
         mkdir_p(os.path.dirname(path))
 
         xyz = self._xyz.detach().cpu().numpy()
@@ -297,6 +305,8 @@ class GaussianModel:
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
+
+        return auxiliary_attr
 
     def reset_opacity(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))

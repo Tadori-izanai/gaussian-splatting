@@ -8,3 +8,5 @@ pip install scipy
 pip install submodules/diff-gaussian-rasterization
 pip install submodules/simple-knn
 pip install "git+https://github.com/facebookresearch/pytorch3d.git"
+pip install submodules/depth-diff-gaussian-rasterization
+pip install submodules/RaDe-GS/submodules/diff-gaussian-rasterization

@@ -27,7 +27,6 @@ def paris2nerf(paris_cameras_path: str, nerf_transforms_path: str, resolution_x:
     with open(nerf_transforms_path, 'w') as outfile:
         json.dump(transforms, outfile, indent=4)
 
-
 if __name__ == '__main__':
     res = 800
     input_path = 'data/storage45135/end/camera_train.json'

@@ -11,7 +11,9 @@
 
 import torch
 import math
-from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+# from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+from depth_diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+# from rade_diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 
@@ -33,7 +35,14 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
+    kernel_size = 13
+    require_coord = True
+    require_depth = True
+
     raster_settings = GaussianRasterizationSettings(
+        # kernel_size=kernel_size,
+        # require_coord=require_coord,
+        # require_depth=require_depth,
         image_height=int(viewpoint_camera.image_height),
         image_width=int(viewpoint_camera.image_width),
         tanfovx=tanfovx,
@@ -81,8 +90,12 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     else:
         colors_precomp = override_color
 
-    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    rendered_image, radii = rasterizer(
+    # Rasterize visible Gaussians to image, obtain their radii (on screen).
+    (
+        rendered_image, radii,
+        # rendered_expected_coord, rendered_median_coord, rendered_expected_depth, rendered_median_depth, rendered_alpha, rendered_normal \
+        rendered_expected_depth
+    ) = rasterizer(
         means3D = means3D,
         means2D = means2D,
         shs = shs,
@@ -97,4 +110,5 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     return {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
+            "depth": rendered_expected_depth,
             "radii": radii}
