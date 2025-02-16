@@ -44,9 +44,10 @@ def train_single_demo(path, data_path):
     dataset.source_path = os.path.realpath(data_path)
     dataset.model_path = path
     # train_single(dataset, opt, pipes, gaussians, bce_weight=0.01)
-    train_single(dataset, opt, pipes, gaussians, bce_weight=None)
+    # train_single(dataset, opt, pipes, gaussians, bce_weight=None)
+    train_single(dataset, opt, pipes, gaussians, depth_weight=1.0)
 
-def mask_init_demo(out_path, st_path, ed_path, data_path, thr=None):
+def mask_init_demo(out_path, st_path, ed_path, data_path, thr=None, sig_scale=0.2):
     os.makedirs(out_path, exist_ok=True)
     dataset, pipes, opt = get_default_args()
     dataset.eval = True
@@ -64,7 +65,7 @@ def mask_init_demo(out_path, st_path, ed_path, data_path, thr=None):
     if thr is None:
         thr = otsu_with_peak_filtering(csn_is.detach().cpu().numpy(), bias_factor=1.25)
         print(thr)
-    csn_shifted = torch.sigmoid((inverse_sigmoid(cds_st_normalized) - thr))
+    csn_shifted = torch.sigmoid((inverse_sigmoid(cds_st_normalized) - thr) * sig_scale)
 
     mask = (csn_shifted > 0.5).detach().cpu().numpy()
 
@@ -154,22 +155,32 @@ if __name__ == '__main__':
     # data = 'data/blade103706'
     # out = 'output/blade-art'
 
-    st = 'output/storage_st'
-    ed = 'output/storage_ed'
-    data = 'data/storage45135'
-    out = 'output/storage-art'
+    # st = 'output/storage_st'
+    # ed = 'output/storage_ed'
+    # data = 'data/storage45135'
+    # out = 'output/storage-art'
 
     # st = 'output/fridge_st'
     # ed = 'output/fridge_ed'
     # data = 'data/fridge10905'
     # out = 'output/fridge-art'
 
+    st = 'output/storage_st-wd'
+    ed = 'output/storage_ed-wd'
+    data = 'data/dta/storage_45135'
+    out = 'output/storage-wd'
+
+    # st = 'output/usb_st-wd'
+    # ed = 'output/usb_ed-wd'
+    # data = 'data/dta/USB_100109'
+    # out = 'output/usb-wd'
+
     get_gt_motion_params(data)
 
-    train_single_demo(st, os.path.join(data, 'start'))
-    train_single_demo(ed, os.path.join(data, 'end'))
+    # train_single_demo(st, os.path.join(data, 'start'))
+    # train_single_demo(ed, os.path.join(data, 'end'))
     mask_init_demo(out, st, ed, data, thr=None)
-    am_optim_demo(out, st, ed, data)
-    joint_optim_demo(out, st, data)
+    # am_optim_demo(out, st, ed, data)
+    # joint_optim_demo(out, st, data)
 
     pass

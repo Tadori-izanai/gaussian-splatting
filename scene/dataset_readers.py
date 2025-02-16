@@ -34,6 +34,8 @@ class CameraInfo(NamedTuple):
     image_name: str
     width: int
     height: int
+    image_d: np.array
+    image_d_path: str
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -98,7 +100,17 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         image_name = os.path.basename(image_path).split(".")[0]
         image = Image.open(image_path)
 
+        images_folder = images_folder.rstrip('/')
+        image_d_path = os.path.join(images_folder + '_d', os.path.basename(extr.name)).__str__()
+        if os.path.exists(image_d_path):
+            image_d = Image.open(image_d_path)
+            image_d = np.array(image_d) / 1e3
+        else:
+            image_d_path = None
+            image_d = None
+
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+                              image_d_path=image_d_path, image_d=image_d,
                               image_path=image_path, image_name=image_name, width=width, height=height)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
@@ -232,6 +244,15 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             image_name = Path(cam_name).stem
             image = Image.open(image_path)
 
+            images_folder, image_basename = os.path.split(image_path)
+            image_d_path = os.path.join(images_folder + '_d', image_basename).__str__()
+            if os.path.exists(image_d_path):
+                image_d = Image.open(image_d_path)
+                image_d = np.array(image_d) / 1e3
+            else:
+                image_d_path = None
+                image_d = None
+
             im_data = np.array(image.convert("RGBA"))
 
             bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
@@ -245,6 +266,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             FovX = fovx
 
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+                            image_d_path=image_d_path, image_d=image_d,
                             image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
             
     return cam_infos

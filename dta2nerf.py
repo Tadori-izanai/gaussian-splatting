@@ -55,6 +55,7 @@ def convert_to_nerf(path: str, res_x: int, is_start_zero: bool) -> None:
     test_ed_path = os.path.join(end_path, 'test')
     for out_path in [train_st_path, test_st_path, train_ed_path, test_ed_path]:
         os.makedirs(out_path, exist_ok=True)
+        os.makedirs(out_path + '_d', exist_ok=True)
 
     cam_k = np.loadtxt(os.path.join(path, 'cam_K.txt'))
     f_x = cam_k[0][0]
@@ -82,7 +83,10 @@ def convert_to_nerf(path: str, res_x: int, is_start_zero: bool) -> None:
         source_img = os.path.join(path, 'color_rgba', img_name)
         target_img = os.path.join(path, 'end' if is_end else 'start', 'train', img_name)
         Image.open(source_img).save(target_img)
-        print('done with image: ', target_img)
+        source_img = os.path.join(path, 'depth_filtered', img_name)
+        target_img = os.path.join(path, 'end' if is_end else 'start', 'train_d', img_name)
+        Image.open(source_img).save(target_img)
+        print('done with:', img_name)
 
     save_dict_to_json(transforms_train_st, os.path.join(start_path, 'transforms_train.json'))
     save_dict_to_json(transforms_train_ed, os.path.join(end_path, 'transforms_train.json'))
@@ -91,7 +95,8 @@ def convert_to_nerf(path: str, res_x: int, is_start_zero: bool) -> None:
 
 
 if __name__ == '__main__':
-    data_path = 'data/dta/storage_45135'
+    # data_path = 'data/dta/storage_45135'
+    data_path = 'data/dta/USB_100109'
 
-    # gen_rgba_images(data_path)
-    convert_to_nerf(data_path, res_x=800, is_start_zero=False)
+    gen_rgba_images(data_path)
+    convert_to_nerf(data_path, res_x=800, is_start_zero=True)

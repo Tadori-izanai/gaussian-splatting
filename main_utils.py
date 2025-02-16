@@ -9,10 +9,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from train import prepare_output_and_logger
 from arguments import get_default_args
-from utils.loss_utils import eval_losses, show_losses, eval_img_loss, eval_opacity_bce_loss
+from utils.loss_utils import eval_losses, show_losses, eval_img_loss, eval_opacity_bce_loss, eval_depth_loss
 from scene import BWScenes
 
-def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None):
+def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, depth_weight=None):
     _ = prepare_output_and_logger(dataset)
     bws = BWScenes(dataset, gaussians, is_new_gaussians=True)
     gaussians.training_setup(opt)
@@ -37,6 +37,11 @@ def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None):
 
         if bce_weight is not None:
             loss += bce_weight * eval_opacity_bce_loss(gaussians.get_opacity)
+        if (depth_weight is not None) and (viewpoint_cam.image_depth is not None) and (i > opt.opacity_reset_interval):
+            depth = render_pkg['depth']
+            gt_depth = viewpoint_cam.image_depth.cuda()
+            loss += depth_weight * eval_depth_loss(depth, gt_depth)
+
         loss.backward()
         with torch.no_grad():
             # Progress bar

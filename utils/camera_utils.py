@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import torch
 from scene.cameras import Camera
 import numpy as np
 from utils.general_utils import PILtoTorch
@@ -39,6 +40,14 @@ def loadCam(args, id, cam_info, resolution_scale):
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
     resized_image_rgb = PILtoTorch(cam_info.image, resolution)
+    gt_image_d = None
+    if cam_info.image_d is not None:
+        assert 0.999 < resolution_scale < 1.001
+        gt_image_d = torch.from_numpy(cam_info.image_d)
+        if len(gt_image_d.shape) == 3:
+            gt_image_d = gt_image_d[:, :, :1].permute(2, 0, 1)
+        else:
+            gt_image_d = gt_image_d.unsqueeze(dim=-1).permute(2, 0, 1)
 
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
@@ -49,7 +58,7 @@ def loadCam(args, id, cam_info, resolution_scale):
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device)
+                  image_name=cam_info.image_name, uid=id, image_d=gt_image_d, data_device=args.data_device)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []
