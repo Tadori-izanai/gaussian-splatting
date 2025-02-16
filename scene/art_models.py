@@ -13,7 +13,7 @@ from scene.gaussian_model import GaussianModel
 from scene.articulation_model import ArticulationModelBasic
 from scene import Scene, BWScenes
 from utils.general_utils import quat_mult, mat2quat, mat2quat_batch, inverse_sigmoid
-from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd
+from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd, eval_depth_loss
 from train import prepare_output_and_logger
 
 class ArticulationModel(ArticulationModelBasic):
@@ -32,6 +32,11 @@ class ArticulationModel(ArticulationModelBasic):
         # self.opt.mask_thresh = .514
         self.opt.mask_thresh = .85
         self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
+
+        # self.opt.depth_weight = None
+        self.opt.depth_weight = 1.0
+        self.opt.cd_n_sample = None
+        # self.opt.cd_n_sample = 10000
 
     def __init__(self, gaussians: GaussianModel):
         super().__init__(gaussians)
@@ -87,7 +92,8 @@ class ArticulationModel(ArticulationModelBasic):
     def _show_losses(self, iteration: int, losses: dict):
         if iteration in [1000, 5000, 9000, 15000]:
             self.gaussians.save_ply(
-                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration}/point_cloud.ply')
+                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration}/point_cloud.ply'),
+                prune=False
             )
 
         if iteration not in [1, 20, 50, 200, 500, 1000, 2000, 5000, 9000, 15000]:
@@ -106,11 +112,14 @@ class ArticulationModel(ArticulationModelBasic):
         print()
 
     @override
-    def _eval_losses(self, image, gt_image, gaussians, gt_gaussians=None, requires_cd=False):
+    def _eval_losses(self, render_pkg, viewpoint_cam, gaussians, gt_gaussians=None, requires_cd=False):
+        image = render_pkg['render']
+        gt_image = viewpoint_cam.original_image.cuda()
         losses = {
             'im': eval_img_loss(image, gt_image, self.opt),
             'cd': None,
             'bce': None,
+            'd': None,
         }
         loss = losses['im']
         if (self.opt.cd_weight is not None) and (gt_gaussians is not None) and requires_cd:
@@ -127,11 +136,16 @@ class ArticulationModel(ArticulationModelBasic):
                 definite_gaussians.get_xyz = gaussians.get_xyz[:num][self.get_prob > self.opt.mask_thresh]
 
             # losses['cd'] = eval_cd_loss(gaussians, gt_gaussians, self.opt.cd_numbers)
-            losses['cd'] = eval_cd_loss_sd(definite_gaussians, gt_gaussians)
+            losses['cd'] = eval_cd_loss_sd(definite_gaussians, gt_gaussians, n_samples=self.opt.cd_n_sample)
             loss += self.opt.cd_weight * losses['cd']
         if self.opt.bce_weight is not None:
             losses['bce'] = self._eval_bce_loss()
             loss += self.opt.bce_weight * losses['bce']
+        if (self.opt.depth_weight is not None) and (viewpoint_cam.image_depth is not None):
+            depth = render_pkg['depth']
+            gt_depth = viewpoint_cam.image_depth.cuda()
+            losses['d'] = eval_depth_loss(depth, gt_depth)
+            loss += self.opt.depth_weight * losses['d']
         return loss, losses
 
     def _eval_bce_loss(self):
@@ -156,13 +170,8 @@ class ArticulationModel(ArticulationModelBasic):
             self.deform()
 
             render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, background)
-            image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
-                render_pkg["visibility_filter"], render_pkg["radii"]
-            gt_image = viewpoint_cam.original_image.cuda()
-
-            # requires_cd = (self.opt.cd_from_iter <= i <= self.opt.cd_until_iter) and self.is_revolute
             requires_cd = (self.opt.cd_from_iter <= i <= self.opt.cd_until_iter)
-            loss, losses = self._eval_losses(image, gt_image, self.gaussians, gt_gaussians, requires_cd=requires_cd)
+            loss, losses = self._eval_losses(render_pkg, viewpoint_cam, self.gaussians, gt_gaussians, requires_cd=requires_cd)
             loss.backward()
             with torch.no_grad():
                 ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log

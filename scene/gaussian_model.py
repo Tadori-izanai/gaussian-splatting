@@ -23,6 +23,7 @@ from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 
 from utils.general_utils import knn
+from arguments import get_default_args
 
 class GaussianModel:
 
@@ -280,14 +281,19 @@ class GaussianModel:
             l.append('rot_{}'.format(i))
         return l
     
-    def save_ply(self, path, min_opacity=0.005, auxiliary_attr=None):
-        copy.deepcopy(self).save_ply_helper(path, min_opacity, auxiliary_attr)
-
-    def save_ply_helper(self, path, min_opacity=0.005, auxiliary_attr=None):
+    def save_ply(self, path, min_opacity=0.005, auxiliary_attr=None, prune=False):
+        self.save_ply_helper(path)
         # removes gaussians whose opacities is too small, ensuring the accuracy in final point cloud
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
-        auxiliary_attr = self.prune_points(prune_mask, auxiliary_attr=auxiliary_attr)
+        if prune:
+            gaussians = GaussianModel(0).load_ply(path)
+            _, _, opt = get_default_args()
+            gaussians.training_setup(opt)
+            prune_mask = (gaussians.get_opacity < min_opacity).squeeze()
+            auxiliary_attr = gaussians.prune_points(prune_mask, auxiliary_attr=auxiliary_attr)
+            gaussians.save_ply_helper(path)
+        return auxiliary_attr
 
+    def save_ply_helper(self, path):
         mkdir_p(os.path.dirname(path))
 
         xyz = self._xyz.detach().cpu().numpy()
@@ -305,8 +311,6 @@ class GaussianModel:
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
-
-        return auxiliary_attr
 
     def reset_opacity(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))

@@ -91,8 +91,11 @@ def eval_cd_loss(gaussians: GaussianModel, gt_gaussians: GaussianModel, n_sample
     dist1, _ = chamfer_distance(pts, gt_pts, batch_reduction=None)
     return dist1[0]
 
-def eval_cd_loss_sd(gaussians: GaussianModel, gt_gaussians: GaussianModel) -> torch.Tensor:
-    pts = gaussians.get_xyz.unsqueeze(0)
+def eval_cd_loss_sd(gaussians: GaussianModel, gt_gaussians: GaussianModel, n_samples=None) -> torch.Tensor:
+    if n_samples is not None:
+        pts = _sample_pts(gaussians.get_xyz, n_samples).unsqueeze(0)
+    else:
+        pts = gaussians.get_xyz.unsqueeze(0)
     gt_pts = gt_gaussians.get_xyz.unsqueeze(0)
     dist, _ = chamfer_distance(pts, gt_pts, batch_reduction=None)
     return dist[0]

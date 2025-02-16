@@ -18,7 +18,7 @@ from scene.gaussian_model import GaussianModel
 from scene import Scene, BWScenes
 from utils.general_utils import quat_mult, mat2quat, mat2quat_batch, inverse_sigmoid
 from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd, \
-    eval_knn_opacities_collision_loss, eval_opacity_bce_loss
+    eval_knn_opacities_collision_loss, eval_opacity_bce_loss, eval_depth_loss
 from train import prepare_output_and_logger
 
 class ArticulationModelBasic:
@@ -269,6 +269,8 @@ class ArticulationModelJoint(ArticulationModelBasic):
         self.opt.collision_until_iter = 10000
         self.opt.collision_after_reset_iter = 500
 
+        self.opt.depth_weight = 1.0
+
     def __init__(self, gaussians: GaussianModel, data_path: str, model_path: str, mask: torch.tensor=None):
         self.canonical_gaussians = copy.deepcopy(gaussians)
         super().__init__(gaussians, mask)
@@ -335,7 +337,8 @@ class ArticulationModelJoint(ArticulationModelBasic):
 
             self.deform()
 
-            losses = {'app_st': None, 'app_ed': None, 'collision': None, 'cd': None, 'bce': None}
+            losses = {'app_st': None, 'app_ed': None, 'collision': None, 'cd': None, 'bce': None,
+                      'depth_st': None, 'depth_ed': None}
             requires_collision = (self.opt.collision_from_iter <= i <= self.opt.collision_until_iter)
             requires_collision &= (i - prev_opacity_reset_iter >= self.opt.collision_after_reset_iter)
 
@@ -344,15 +347,28 @@ class ArticulationModelJoint(ArticulationModelBasic):
                 render_pkg["visibility_filter"], render_pkg["radii"]
             gt_image = viewpoint_cam_st.original_image.cuda()
             losses['app_st'] = eval_img_loss(image, gt_image, self.opt)
+            if (self.opt.depth_weight is not None) and (viewpoint_cam_st.image_depth is not None):
+                depth = render_pkg['depth']
+                gt_depth = viewpoint_cam_st.image_depth.cuda()
+                losses['depth_st'] = eval_depth_loss(depth, gt_depth)
 
             render_pkg = render(viewpoint_cam_ed, self.gaussians, self.pipe, background_ed)
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
                 render_pkg["visibility_filter"], render_pkg["radii"]
             gt_image = viewpoint_cam_ed.original_image.cuda()
             losses['app_ed'] = eval_img_loss(image, gt_image, self.opt)
+            if (self.opt.depth_weight is not None) and (viewpoint_cam_ed.image_depth is not None):
+                depth = render_pkg['depth']
+                gt_depth = viewpoint_cam_ed.image_depth.cuda()
+                losses['depth_ed'] = eval_depth_loss(depth, gt_depth)
 
             weight_st = losses['app_st'].detach() / (losses['app_st'].detach() + losses['app_ed'].detach())
             loss = weight_st * losses['app_st'] + (1 - weight_st) * losses['app_ed']
+            if (losses['depth_st'] is not None) and (losses['depth_ed'] is not None):
+                weight_st = losses['depth_st'].detach() / (losses['depth_st'].detach() + losses['depth_ed'].detach())
+                loss += self.opt.depth_weight * (
+                    weight_st * losses['depth_st'] + (1 - weight_st) * losses['depth_ed']
+                )
             if (self.opt.collision_weight is not None) and requires_collision:
                 losses['collision'] = eval_knn_opacities_collision_loss(self.gaussians, self.mask, k=self.opt.collision_knn)
                 loss += self.opt.collision_weight * losses['collision']
@@ -398,10 +414,12 @@ class ArticulationModelJoint(ArticulationModelBasic):
     def _show_losses(self, iteration: int, losses: dict):
         if iteration in [1000, 5000, 9000]:
             self.canonical_gaussians.save_ply(
-                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration - 1}/point_cloud.ply')
+                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration - 1}/point_cloud.ply'),
+                prune=False
             )
             self.gaussians.save_ply(
-                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration - 2}/point_cloud.ply')
+                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration - 2}/point_cloud.ply'),
+                prune=False
             )
 
         if iteration not in [1, 20, 50, 200, 500, 1000, 2000,

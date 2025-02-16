@@ -45,7 +45,7 @@ def train_single_demo(path, data_path):
     dataset.model_path = path
     # train_single(dataset, opt, pipes, gaussians, bce_weight=0.01)
     # train_single(dataset, opt, pipes, gaussians, bce_weight=None)
-    train_single(dataset, opt, pipes, gaussians, depth_weight=1.0)
+    train_single(dataset, opt, pipes, gaussians, depth_weight=1.0, bce_weight=0.01)
 
 def mask_init_demo(out_path, st_path, ed_path, data_path, thr=None, sig_scale=0.2):
     os.makedirs(out_path, exist_ok=True)
@@ -165,22 +165,28 @@ if __name__ == '__main__':
     # data = 'data/fridge10905'
     # out = 'output/fridge-art'
 
+    ###
     st = 'output/storage_st-wd'
     ed = 'output/storage_ed-wd'
     data = 'data/dta/storage_45135'
-    out = 'output/storage-wd'
+    out = 'output/storage'
 
     # st = 'output/usb_st-wd'
     # ed = 'output/usb_ed-wd'
     # data = 'data/dta/USB_100109'
-    # out = 'output/usb-wd'
+    # out = 'output/usb'
+    #
+    # st = 'output/blade_st-wd'
+    # ed = 'output/blade_ed-wd'
+    # data = 'data/dta/blade_103706'
+    # out = 'output/blade'
 
     get_gt_motion_params(data)
 
     # train_single_demo(st, os.path.join(data, 'start'))
     # train_single_demo(ed, os.path.join(data, 'end'))
-    mask_init_demo(out, st, ed, data, thr=None)
+    # mask_init_demo(out, st, ed, data, sig_scale=1)
     # am_optim_demo(out, st, ed, data)
-    # joint_optim_demo(out, st, data)
+    joint_optim_demo(out, st, data)
 
     pass

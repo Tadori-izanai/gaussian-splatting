@@ -295,7 +295,7 @@ def otsu_with_peak_filtering(data, std_multiplier=3, bins=256, bias_factor=1.25)
             mean_bg += hist[i] * bin_centers[i]
 
             weight_fg = total_weight - weight_bg
-            if weight_bg == 0 or weight_fg == 0:
+            if weight_bg <= 0 or weight_fg <= 0:
                 continue
 
             mean_fg = (total_mean - mean_bg) / weight_fg
