@@ -288,6 +288,7 @@ class GaussianModel:
             gaussians = GaussianModel(0).load_ply(path)
             _, _, opt = get_default_args()
             gaussians.training_setup(opt)
+            gaussians.max_radii2D = torch.zeros((gaussians.get_xyz.shape[0]), device="cuda")
             prune_mask = (gaussians.get_opacity < min_opacity).squeeze()
             auxiliary_attr = gaussians.prune_points(prune_mask, auxiliary_attr=auxiliary_attr)
             gaussians.save_ply_helper(path)
@@ -399,7 +400,10 @@ class GaussianModel:
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
         if auxiliary_attr is not None:
-            auxiliary_attr = auxiliary_attr[valid_points_mask]
+            if isinstance(auxiliary_attr, tuple):
+                auxiliary_attr = tuple(attr[valid_points_mask] for attr in auxiliary_attr)
+            else:
+                auxiliary_attr = auxiliary_attr[valid_points_mask]
 
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
@@ -478,11 +482,13 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
 
         if auxiliary_attr is not None:
-            new_attr = auxiliary_attr[selected_pts_mask].repeat(N)
-            # print(auxiliary_attr.shape)
-            # print(auxiliary_attr[selected_pts_mask].shape)
-            # print(new_attr.shape)
-            auxiliary_attr = torch.cat((auxiliary_attr, new_attr), dim=0)
+            if isinstance(auxiliary_attr, tuple):
+                new_attrs = tuple(attr[selected_pts_mask].repeat(N) for attr in auxiliary_attr)
+                auxiliary_attr = tuple(
+                    torch.cat((existing, new), dim=0) for existing, new in zip(auxiliary_attr, new_attrs))
+            else:
+                new_attr = auxiliary_attr[selected_pts_mask].repeat(N)
+                auxiliary_attr = torch.cat((auxiliary_attr, new_attr), dim=0)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
 
@@ -505,8 +511,14 @@ class GaussianModel:
         new_rotation = self._rotation[selected_pts_mask]
 
         if auxiliary_attr is not None:
-            new_attr = auxiliary_attr[selected_pts_mask]
-            auxiliary_attr = torch.cat((auxiliary_attr, new_attr), dim=0)
+            if isinstance(auxiliary_attr, tuple):
+                new_attrs = tuple(attr[selected_pts_mask] for attr in auxiliary_attr)
+                auxiliary_attr = tuple(
+                    torch.cat((existing, new), dim=0) for existing, new in zip(auxiliary_attr, new_attrs)
+                )
+            else:
+                new_attr = auxiliary_attr[selected_pts_mask]
+                auxiliary_attr = torch.cat((auxiliary_attr, new_attr), dim=0)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
         return auxiliary_attr
@@ -594,13 +606,13 @@ class GaussianModel:
         with torch.no_grad():
             self._opacity[dist < threshold] = -1e514
 
-    def duplicate(self):
-        self._xyz = torch.cat([self._xyz, self._xyz])
-        self._features_dc = torch.cat([self._features_dc, self._features_dc])
-        self._features_rest = torch.cat([self._features_rest, self._features_rest])
-        self._opacity = torch.cat([self._opacity, self._opacity])
-        self._scaling = torch.cat([self._scaling, self._scaling])
-        self._rotation = torch.cat([self._rotation, self._rotation])
+    def duplicate(self, n_rep: int=2):
+        self._xyz = torch.cat([self._xyz] * n_rep, dim=0)
+        self._features_dc = torch.cat([self._features_dc] * n_rep, dim=0)
+        self._features_rest = torch.cat([self._features_rest] * n_rep, dim=0)
+        self._opacity = torch.cat([self._opacity] * n_rep, dim=0)
+        self._scaling = torch.cat([self._scaling] * n_rep, dim=0)
+        self._rotation = torch.cat([self._rotation] * n_rep, dim=0)
 
     def op_grad(self):
         return self._opacity.grad

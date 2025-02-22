@@ -24,7 +24,7 @@ from train import prepare_output_and_logger
 from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses
 from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid
-from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
+from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint, ArticulationModelJointCD
 from scene.art_models import ArticulationModel
 
 from main_utils import *
@@ -286,3 +286,22 @@ def final_joint_optim_demo(model_path: str, data_path='data/USB100109', pre_path
     gaussians_dynamic = GaussianModel(0).load_ply(os.path.join(model_path, 'point_cloud/iteration_30000/point_cloud.ply')).cancel_grads()
     gaussians_dynamic.get_opacity_raw[~am.mask] = -1e514
     gaussians_dynamic.save_ply(os.path.join(model_path, 'point_cloud/iteration_9/point_cloud.ply'))
+
+def joint_optim_from_poor_init_demo(out_path: str, st_path: str, ed_path: str, data_path: str):
+    torch.autograd.set_detect_anomaly(False)
+    mask_pre = torch.tensor(np.load(os.path.join(out_path, 'mask_pre_pre.npy')), device='cuda')
+
+    gaussians_st = get_gaussians(st_path, from_chk=True)
+    gaussians_ed = get_gaussians(ed_path, from_chk=True).cancel_grads()
+    amj = ArticulationModelJointCD(gaussians_st, data_path, out_path, mask_pre)
+    t, r = amj.train(gt_gaussians=gaussians_ed)
+
+    gaussians_m = get_gaussians(out_path, from_chk=False, iters=amj.opt.iterations-1).cancel_grads()
+    gaussians_m.get_opacity_raw[~amj.mask] = -1e514
+    gaussians_m.save_ply(os.path.join(out_path, 'point_cloud/iteration_10/point_cloud.ply'))
+    gaussians_s = get_gaussians(out_path, from_chk=False, iters=amj.opt.iterations-2).cancel_grads()
+    gaussians_s.get_opacity_raw[amj.mask] = -1e514
+    gaussians_s.save_ply(os.path.join(out_path, 'point_cloud/iteration_11/point_cloud.ply'))
+    np.save(os.path.join(out_path, 'mask_final.npy'), amj.mask.cpu().numpy())
+    np.save(os.path.join(out_path, 't_final.npy'), t.detach().cpu().numpy())
+    np.save(os.path.join(out_path, 'r_final.npy'), r.detach().cpu().numpy())

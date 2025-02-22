@@ -68,7 +68,7 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean(1).mean(1).mean(1)
 
 
-def _sample_pts(pts: torch.Tensor, n_samples: int) -> torch.Tensor:
+def sample_pts(pts: torch.Tensor, n_samples: int) -> torch.Tensor:
     n_pts = pts.shape[0]
     if n_samples > n_pts:
         return pts
@@ -86,14 +86,14 @@ def eval_depth_loss(depth, gt_depth) -> torch.Tensor:
     return loss
 
 def eval_cd_loss(gaussians: GaussianModel, gt_gaussians: GaussianModel, n_samples=10000) -> torch.Tensor:
-    pts = _sample_pts(gaussians.get_xyz, n_samples).unsqueeze(0)
-    gt_pts = _sample_pts(gt_gaussians.get_xyz.detach(), n_samples).unsqueeze(0)
+    pts = sample_pts(gaussians.get_xyz, n_samples).unsqueeze(0)
+    gt_pts = sample_pts(gt_gaussians.get_xyz.detach(), n_samples).unsqueeze(0)
     dist1, _ = chamfer_distance(pts, gt_pts, batch_reduction=None)
     return dist1[0]
 
 def eval_cd_loss_sd(gaussians: GaussianModel, gt_gaussians: GaussianModel, n_samples=None) -> torch.Tensor:
     if n_samples is not None:
-        pts = _sample_pts(gaussians.get_xyz, n_samples).unsqueeze(0)
+        pts = sample_pts(gaussians.get_xyz, n_samples).unsqueeze(0)
     else:
         pts = gaussians.get_xyz.unsqueeze(0)
     gt_pts = gt_gaussians.get_xyz.unsqueeze(0)

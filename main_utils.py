@@ -3,6 +3,8 @@ import torch
 from gaussian_renderer import render, network_gui
 from scene import Scene, GaussianModel
 from tqdm import tqdm
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
 
 import json
 import numpy as np
@@ -11,6 +13,8 @@ from train import prepare_output_and_logger
 from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses, eval_img_loss, eval_opacity_bce_loss, eval_depth_loss
 from scene import BWScenes
+from scene.gaussian_model import GaussianModel
+from utils.general_utils import get_per_point_cd, otsu_with_peak_filtering, inverse_sigmoid
 
 def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, depth_weight=None):
     _ = prepare_output_and_logger(dataset)
@@ -92,9 +96,9 @@ def print_motion_params(out_path: str):
     print('t:', t)
     print('r:', r)
 
-def plot_hist(x: torch.Tensor, path: str):
+def plot_hist(x: torch.Tensor, path: str, bins=100):
     plt.figure()
-    plt.hist(x.detach().cpu().numpy(), bins=100)
+    plt.hist(x.detach().cpu().numpy(), bins=bins)
     plt.savefig(path)
 
 def get_gt_motion_params(data_path: str):
@@ -125,4 +129,79 @@ def get_gt_motion_params(data_path: str):
     print('r:', r)
     return t, r
 
+def get_gt_motion_params_mp(data_path: str, reverse=False):
+    with open(os.path.join(data_path, 'trans.json'), 'r') as json_file:
+        trans = json.load(json_file)
+    trans_infos = trans['trans_info']
+    for trans_info in trans_infos:
+        r = np.eye(3)
+        if trans_info['type'] == 'translate':
+            direction = np.array(trans_info['axis']['d'])
+            distance = trans_info['translate']['r'] - trans_info['translate']['l']
+            t = direction * distance
+        elif trans_info['type'] == 'rotate':
+            c = np.array(trans_info['axis']['o'])
+            n = np.array(trans_info['axis']['d'])
+            n /= np.linalg.norm(n)
+            theta = (trans_info['rotate']['r'] - trans_info['rotate']['l']) / 180 * np.pi
+            r = np.eye(3) * np.cos(theta) + (1 - np.cos(theta)) * (n[:, np.newaxis] @ n[np.newaxis, :]) + np.sin(theta) * (
+                np.array([[0, -n[2], n[1]], [n[2], 0, -n[0]], [-n[1], n[0], 0]])
+            )
+            t = c - r @ c
+            r = r.T
+        else:
+            assert False
+        print('t:', t if not reverse else -r.T @ t)
+        print('r:', r if not reverse else r.T)
 
+def mk_output_dir(out_path: str, data_path: str):
+    os.makedirs(out_path, exist_ok=True)
+    dataset, pipes, opt = get_default_args()
+    dataset.eval = True
+    dataset.sh_degree = 0
+    dataset.source_path = os.path.realpath(data_path)
+    dataset.model_path = out_path
+    _ = prepare_output_and_logger(dataset)
+
+def init_mpp(gaussians_st: GaussianModel, gaussians_ed: GaussianModel, thr=None, sig_scale=1.0):
+    cds_st = get_per_point_cd(gaussians_st, gaussians_ed)
+    cds_st_normalized = cds_st / torch.max(cds_st)
+
+    eps = 1e-6
+    csn_is = inverse_sigmoid(torch.clamp(cds_st_normalized, eps, 1-eps))
+    if thr is None:
+        thr = otsu_with_peak_filtering(csn_is.detach().cpu().numpy(), bias_factor=1.25)
+        print(thr)
+    csn_shifted = torch.sigmoid((inverse_sigmoid(cds_st_normalized) - thr) * sig_scale)
+    return cds_st_normalized, csn_is, csn_shifted
+
+# def get_cluster_centers(pts: torch.tensor, num: int) -> torch.tensor:
+#     kmeans = KMeans(n_clusters=num, random_state=42)
+#     kmeans.fit(pts.detach().cpu().numpy())
+#     centroids = kmeans.cluster_centers_
+#     return torch.tensor(centroids, device=pts.device)
+#
+# def get_ppp_from_dist(pts: torch.tensor, centers: torch.tensor):
+#     dist_to_centers = (pts.unsqueeze(1) - centers).norm(dim=2)
+#     prob = dist_to_centers / torch.sum(dist_to_centers, dim=1, keepdim=True)
+#     return prob
+
+def get_ppp_from_gmm(train_pts: torch.tensor, test_pts: torch.tensor, num: int) -> torch.tensor:
+    gmm = GaussianMixture(n_components=num, random_state=42)
+    gmm.fit(train_pts.detach().cpu().numpy())
+    prob = gmm.predict_proba(test_pts.detach().cpu().numpy())
+    return torch.tensor(prob, device=test_pts.device)
+
+def get_ppp_from_gmm_v2(train_pts: torch.tensor, test_pts: torch.tensor, num: int) -> torch.tensor:
+    gmm = GaussianMixture(n_components=num, random_state=42)
+    gmm.fit(train_pts.detach().cpu().numpy())
+    means = gmm.means_
+    covariances = gmm.covariances_
+
+    inv_covariances = np.linalg.inv(covariances)
+    diff = test_pts.detach().cpu().numpy()[:, np.newaxis, :] - means
+    quad = np.einsum('pki,kij,pkj->pk', diff, inv_covariances, diff)
+    # prob = 1 / (np.sqrt(quad) + 1e-6)
+    prob = 1 / (quad ** 2 + 1e-6)
+    prob /= np.sum(prob, axis=1, keepdims=True)
+    return torch.tensor(prob, device=test_pts.device)

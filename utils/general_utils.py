@@ -22,6 +22,9 @@ from pytorch3d.loss import chamfer_distance
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
 
+def inverse_softmax(x):
+    return torch.log(x)
+
 def PILtoTorch(pil_image, resolution):
     resized_image_PIL = pil_image.resize(resolution)
     resized_image = torch.from_numpy(np.array(resized_image_PIL)) / 255.0

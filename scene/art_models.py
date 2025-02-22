@@ -125,15 +125,21 @@ class ArticulationModel(ArticulationModelBasic):
         if (self.opt.cd_weight is not None) and (gt_gaussians is not None) and requires_cd:
             num = gaussians.size() // 2
             definite_gaussians = GaussianModel(0)
-            if self.is_revolute:
-                definite_gaussians.get_xyz = torch.cat(
-                    (
-                        gaussians.get_xyz[:num][self.get_prob > self.opt.mask_thresh],
-                        gaussians.get_xyz[num: 2 * num][self.get_prob < (1 - self.opt.mask_thresh)]
-                    ), dim=0
-                )
-            else:
-                definite_gaussians.get_xyz = gaussians.get_xyz[:num][self.get_prob > self.opt.mask_thresh]
+            # if self.is_revolute:
+            #     definite_gaussians.get_xyz = torch.cat(
+            #         (
+            #             gaussians.get_xyz[:num][self.get_prob > self.opt.mask_thresh],
+            #             gaussians.get_xyz[num: 2 * num][self.get_prob < (1 - self.opt.mask_thresh)]
+            #         ), dim=0
+            #     )
+            # else:
+            #     definite_gaussians.get_xyz = gaussians.get_xyz[:num][self.get_prob > self.opt.mask_thresh]
+            definite_gaussians.get_xyz = torch.cat(
+                (
+                    gaussians.get_xyz[:num][self.get_prob > self.opt.mask_thresh],
+                    gaussians.get_xyz[num: 2 * num][self.get_prob < (1 - self.opt.mask_thresh)]
+                ), dim=0
+            )
 
             # losses['cd'] = eval_cd_loss(gaussians, gt_gaussians, self.opt.cd_numbers)
             losses['cd'] = eval_cd_loss_sd(definite_gaussians, gt_gaussians, n_samples=self.opt.cd_n_sample)
