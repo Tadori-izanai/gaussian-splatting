@@ -30,10 +30,12 @@ from utils.loss_utils import eval_losses, show_losses
 from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid, get_per_point_cd
 from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
 from scene.art_models import ArticulationModel
-from scene.multipart_models import MPArtModel, MPArtModelJoint
+from scene.multipart_models import MPArtModel, MPArtModelJoint, OptimOMP, MPArtModelII
 
 from main_utils import train_single, get_gaussians, print_motion_params, get_gt_motion_params, plot_hist, \
     mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, get_gt_motion_params_mp
+
+from misc import mp_training_demo_v2, mp_mp_optim_demo
 
 def train_single_demo(path, data_path):
     dataset, pipes, opt = get_default_args()
@@ -181,8 +183,8 @@ def mp_joint_optimization_demo(out_path: str, st_path: str, data_path: str, num_
     gaussians_canonical[part_indices == 0].save_ply(os.path.join(out_path, 'point_cloud/iteration_29/point_cloud.ply'))
     np.save(os.path.join(out_path, 't_final.npy'), [tt.detach().cpu().numpy() for tt in t])
     np.save(os.path.join(out_path, 'r_final.npy'), [rr.detach().cpu().numpy() for rr in r])
-    np.save(os.path.join(out_path, 'mask_final.npy'), mask)
-    np.save(os.path.join(out_path, 'part_indices_final'), part_indices)
+    np.save(os.path.join(out_path, 'mask_final.npy'), mask.detach().cpu().numpy())
+    np.save(os.path.join(out_path, 'part_indices_final'), part_indices.detach().cpu().numpy())
 
 if __name__ == '__main__':
     # st = 'output/tmp/ust'
@@ -223,6 +225,9 @@ if __name__ == '__main__':
     # train_single_demo(ed, os.path.join(data, 'end'))
     # init_pp_demo(out, st, ed, data, num_movable=K)
     # mp_training_demo(out, st, ed, data, num_movable=K)
-    mp_joint_optimization_demo(out, st, data, num_movable=K)
+    # mp_joint_optimization_demo(out, st, data, num_movable=K)
+
+    mp_mp_optim_demo(out, st, ed, data, num_movable=K)
+    # mp_training_demo_v2(out, st, ed, data, num_movable=K)
 
     pass

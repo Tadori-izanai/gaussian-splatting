@@ -24,8 +24,9 @@ from train import prepare_output_and_logger
 from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses
 from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid
-from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint, ArticulationModelJointCD
+from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
 from scene.art_models import ArticulationModel
+from scene.multipart_models import OptimOMP, MPArtModelII
 
 from main_utils import *
 
@@ -287,21 +288,61 @@ def final_joint_optim_demo(model_path: str, data_path='data/USB100109', pre_path
     gaussians_dynamic.get_opacity_raw[~am.mask] = -1e514
     gaussians_dynamic.save_ply(os.path.join(model_path, 'point_cloud/iteration_9/point_cloud.ply'))
 
-def joint_optim_from_poor_init_demo(out_path: str, st_path: str, ed_path: str, data_path: str):
+# def joint_optim_from_poor_init_demo(out_path: str, st_path: str, ed_path: str, data_path: str):
+#     torch.autograd.set_detect_anomaly(False)
+#     mask_pre = torch.tensor(np.load(os.path.join(out_path, 'mask_pre_pre.npy')), device='cuda')
+#
+#     gaussians_st = get_gaussians(st_path, from_chk=True)
+#     gaussians_ed = get_gaussians(ed_path, from_chk=True).cancel_grads()
+#     amj = ArticulationModelJointCD(gaussians_st, data_path, out_path, mask_pre)
+#     t, r = amj.train(gt_gaussians=gaussians_ed)
+#
+#     gaussians_m = get_gaussians(out_path, from_chk=False, iters=amj.opt.iterations-1).cancel_grads()
+#     gaussians_m.get_opacity_raw[~amj.mask] = -1e514
+#     gaussians_m.save_ply(os.path.join(out_path, 'point_cloud/iteration_10/point_cloud.ply'))
+#     gaussians_s = get_gaussians(out_path, from_chk=False, iters=amj.opt.iterations-2).cancel_grads()
+#     gaussians_s.get_opacity_raw[amj.mask] = -1e514
+#     gaussians_s.save_ply(os.path.join(out_path, 'point_cloud/iteration_11/point_cloud.ply'))
+#     np.save(os.path.join(out_path, 'mask_final.npy'), amj.mask.cpu().numpy())
+#     np.save(os.path.join(out_path, 't_final.npy'), t.detach().cpu().numpy())
+#     np.save(os.path.join(out_path, 'r_final.npy'), r.detach().cpu().numpy())
+
+# multi-part:
+
+def mp_mp_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int, thr=0.85):
     torch.autograd.set_detect_anomaly(False)
-    mask_pre = torch.tensor(np.load(os.path.join(out_path, 'mask_pre_pre.npy')), device='cuda')
-
-    gaussians_st = get_gaussians(st_path, from_chk=True)
+    gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
     gaussians_ed = get_gaussians(ed_path, from_chk=True).cancel_grads()
-    amj = ArticulationModelJointCD(gaussians_st, data_path, out_path, mask_pre)
-    t, r = amj.train(gt_gaussians=gaussians_ed)
 
-    gaussians_m = get_gaussians(out_path, from_chk=False, iters=amj.opt.iterations-1).cancel_grads()
-    gaussians_m.get_opacity_raw[~amj.mask] = -1e514
-    gaussians_m.save_ply(os.path.join(out_path, 'point_cloud/iteration_10/point_cloud.ply'))
-    gaussians_s = get_gaussians(out_path, from_chk=False, iters=amj.opt.iterations-2).cancel_grads()
-    gaussians_s.get_opacity_raw[amj.mask] = -1e514
-    gaussians_s.save_ply(os.path.join(out_path, 'point_cloud/iteration_11/point_cloud.ply'))
-    np.save(os.path.join(out_path, 'mask_final.npy'), amj.mask.cpu().numpy())
-    np.save(os.path.join(out_path, 't_final.npy'), t.detach().cpu().numpy())
-    np.save(os.path.join(out_path, 'r_final.npy'), r.detach().cpu().numpy())
+    am = OptimOMP(gaussians_st, num_movable)
+    am.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path)
+    t, r = am.train(gt_gaussians=gaussians_ed)
+    # t, r = am.train(gt_gaussians=None)
+
+    np.save(os.path.join(out_path, 't_omp.npy'), [tt.detach().cpu().numpy() for tt in t])
+    np.save(os.path.join(out_path, 'r_omp.npy'), [rr.detach().cpu().numpy() for rr in r])
+
+def mp_training_demo_v2(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int, thr=0.85):
+    torch.autograd.set_detect_anomaly(False)
+    gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
+    gaussians_ed = get_gaussians(ed_path, from_chk=True).cancel_grads()
+
+    am = MPArtModelII(gaussians_st, num_movable)
+    am.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path)
+    t, r = am.train(gt_gaussians=gaussians_ed)
+
+    mpp = am.get_prob.detach().cpu().numpy()
+    mask = (mpp > thr)
+    ppp = am.get_ppp.detach().cpu().numpy()
+    part_indices = np.argmax(ppp, axis=1)
+    gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
+    for i in range(num_movable):
+        gaussians_st[mask & (part_indices == i)].save_ply(
+            os.path.join(out_path, f'point_cloud/iteration_{201 + i}/point_cloud.ply')
+        )
+    gaussians_st[~mask].save_ply(os.path.join(out_path, 'point_cloud/iteration_200/point_cloud.ply'))
+    gaussians_st[part_indices == 0].save_ply(os.path.join(out_path, 'point_cloud/iteration_199/point_cloud.ply'))
+    np.save(os.path.join(out_path, 't_pre_v2.npy'), [tt.detach().cpu().numpy() for tt in t])
+    np.save(os.path.join(out_path, 'r_pre_v2.npy'), [rr.detach().cpu().numpy() for rr in r])
+    np.save(os.path.join(out_path, 'mask_pre_v2.npy'), mask)
+    np.save(os.path.join(out_path, 'part_indices_pre_v2'), part_indices)

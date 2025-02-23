@@ -56,7 +56,10 @@ def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, 
 
             # Save ply
             if i in [7000, 30000]:
-                gaussians.save_ply(os.path.join(dataset.model_path, f'point_cloud/iteration_{i}/point_cloud.ply'))
+                gaussians.save_ply(
+                    os.path.join(dataset.model_path, f'point_cloud/iteration_{i}/point_cloud.ply'),
+                    prune=True
+                )
 
             # Densification
             if i < opt.densify_until_iter:
@@ -78,6 +81,9 @@ def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, 
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
     progress_bar.close()
+    with torch.no_grad():
+        prune_mask = (gaussians.get_opacity < 0.005).squeeze()
+        gaussians.prune_points(prune_mask)
     torch.save((gaussians.capture(), opt.iterations), os.path.join(dataset.model_path, 'chkpnt.pth'))
 
 def get_gaussians(model_path, from_chk=True, iters=30003) -> GaussianModel:
