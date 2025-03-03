@@ -16,7 +16,7 @@ from gaussian_renderer import render
 from arguments import GroupParams
 from scene.gaussian_model import GaussianModel
 from scene import Scene, BWScenes
-from utils.general_utils import quat_mult, mat2quat, mat2quat_batch, inverse_sigmoid
+from utils.general_utils import quat_mult, mat2quat, inverse_sigmoid
 from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd, \
     eval_knn_opacities_collision_loss, eval_opacity_bce_loss, eval_depth_loss
 from train import prepare_output_and_logger

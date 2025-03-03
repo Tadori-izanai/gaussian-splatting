@@ -14,7 +14,7 @@ from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses, eval_img_loss, eval_opacity_bce_loss, eval_depth_loss
 from scene import BWScenes
 from scene.gaussian_model import GaussianModel
-from utils.general_utils import get_per_point_cd, otsu_with_peak_filtering, inverse_sigmoid
+from utils.general_utils import get_per_point_cd, otsu_with_peak_filtering, inverse_sigmoid, decompose_covariance_matrix
 
 def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, depth_weight=None):
     _ = prepare_output_and_logger(dataset)
@@ -211,3 +211,15 @@ def get_ppp_from_gmm_v2(train_pts: torch.tensor, test_pts: torch.tensor, num: in
     prob = 1 / (quad ** 2 + 1e-6)
     prob /= np.sum(prob, axis=1, keepdims=True)
     return torch.tensor(prob, device=test_pts.device)
+
+def eval_init_gmm_params(train_pts: torch.tensor, num: int) -> tuple[torch.tensor, torch.tensor]:
+    gmm = GaussianMixture(n_components=num, random_state=42)
+    gmm.fit(train_pts.detach().cpu().numpy())
+    means = torch.tensor(gmm.means_, device=train_pts.device)
+    covariances = torch.tensor(gmm.covariances_, device=train_pts.device)
+    return means, covariances
+
+def modify_scaling(cov: torch.tensor, scaling_modifier=1.0) -> torch.tensor:
+    scaling, rotation = decompose_covariance_matrix(cov)
+    scaling = torch.diag_embed(scaling * scaling_modifier)
+    return rotation @ scaling @ scaling @ rotation.transpose(1, 2)

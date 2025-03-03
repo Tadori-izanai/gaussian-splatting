@@ -26,7 +26,7 @@ from utils.loss_utils import eval_losses, show_losses
 from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid
 from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
 from scene.art_models import ArticulationModel
-from scene.multipart_models import OptimOMP, MPArtModelII
+from scene.multipart_misc import OptimOMP, MPArtModelII
 
 from main_utils import *
 

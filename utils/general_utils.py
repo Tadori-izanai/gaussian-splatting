@@ -325,3 +325,17 @@ def get_per_point_cd(gaussians_x, gaussians_y) -> torch.Tensor:
     y = gaussians_y.get_xyz.unsqueeze(0)
     dist, _ = chamfer_distance(x, y, batch_reduction=None, point_reduction=None, single_directional=True)
     return dist[0]
+
+def eval_quad(x: torch.tensor, mat: torch.tensor) -> torch.tensor:
+    """
+    Calculates x^T mat x
+    """
+    return torch.einsum('pki,kij,pkj->pk', x, mat, x)
+
+def decompose_covariance_matrix(cov: torch.tensor) -> tuple[torch.tensor, torch.tensor]:
+    eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+    rotation_matrices = eigenvectors
+    scaling_values = torch.sqrt(
+        torch.relu(eigenvalues)
+    )  # Use relu to handle potential numerical issues with negative eigenvalues
+    return scaling_values, rotation_matrices

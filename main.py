@@ -27,13 +27,15 @@ import numpy as np
 from train import prepare_output_and_logger
 from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses
-from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid, get_per_point_cd
+from utils.general_utils import eval_quad
 from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
 from scene.art_models import ArticulationModel
-from scene.multipart_models import MPArtModel, MPArtModelJoint, OptimOMP, MPArtModelII
+from scene.multipart_models import MPArtModel, MPArtModelJoint, GMMArtModel
+from scene.multipart_misc import  OptimOMP, MPArtModelII
 
 from main_utils import train_single, get_gaussians, print_motion_params, get_gt_motion_params, plot_hist, \
-    mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, get_gt_motion_params_mp
+    mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, get_gt_motion_params_mp, eval_init_gmm_params, \
+    modify_scaling
 
 from misc import mp_training_demo_v2, mp_mp_optim_demo
 
@@ -91,6 +93,33 @@ def init_pp_demo(out_path: str, st_path: str, ed_path: str, data_path:str, num_m
     np.save(os.path.join(out_path, 'ppp_init.npy'), ppp.detach().cpu().numpy())
     gaussians_st[part_indices == 0].save_ply(os.path.join(out_path, 'point_cloud/iteration_9/point_cloud.ply'))
 
+def init_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int):
+    mk_output_dir(out_path, os.path.join(data_path, 'start'))
+    gaussians_st = get_gaussians(st_path, from_chk=True)
+    gaussians_ed = get_gaussians(ed_path, from_chk=True)
+
+    _, _, mpp = init_mpp(gaussians_st, gaussians_ed)
+    mask_s = (mpp < .5)
+    mu, sigma = eval_init_gmm_params(train_pts=gaussians_st[~mask_s].get_xyz, num=num_movable)
+
+    sigma_modified = modify_scaling(sigma, scaling_modifier=10)
+    quad = eval_quad(gaussians_st.get_xyz.unsqueeze(1) - mu, torch.linalg.inv(sigma_modified))
+    ppp = torch.exp(-quad)
+    ppp /= ppp.sum(dim=1, keepdim=True)
+    part_indices = torch.argmax(ppp, dim=1)
+
+    for i in range(num_movable):
+        gaussians_st[~mask_s & (part_indices == i)].save_ply(
+            os.path.join(out_path, f'point_cloud/iteration_{11 + i}/point_cloud.ply')
+        )
+    gaussians_st[mask_s].save_ply(os.path.join(out_path, 'point_cloud/iteration_10/point_cloud.ply'))
+    gaussians_st[part_indices == 0].save_ply(os.path.join(out_path, 'point_cloud/iteration_9/point_cloud.ply'))
+    plot_hist(mpp, os.path.join(out_path, 'mpp.png'))
+    plot_hist(ppp[:, 0], os.path.join(out_path, 'ppp0.png'), bins=200)
+    np.save(os.path.join(out_path, 'mpp_init.npy'), mpp.detach().cpu().numpy())
+    np.save(os.path.join(out_path, 'mu_init.npy'), mu.detach().cpu().numpy())
+    np.save(os.path.join(out_path, 'sigma_init.npy'), sigma.detach().cpu().numpy())
+
 def am_optim_demo(out_path: str, st_path: str, ed_path: str, data_path, thr=0.85):
     torch.autograd.set_detect_anomaly(False)
     gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
@@ -141,6 +170,33 @@ def mp_training_demo(out_path: str, st_path: str, ed_path: str, data_path: str, 
     gaussians_st[part_indices == 0].save_ply(os.path.join(out_path, 'point_cloud/iteration_19/point_cloud.ply'))
     np.save(os.path.join(out_path, 't_pre.npy'), [tt.detach().cpu().numpy() for tt in t])
     np.save(os.path.join(out_path, 'r_pre.npy'), [rr.detach().cpu().numpy() for rr in r])
+    np.save(os.path.join(out_path, 'mask_pre.npy'), mask)
+    np.save(os.path.join(out_path, 'part_indices_pre'), part_indices)
+
+def gmm_am_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int, thr=0.85):
+    # torch.autograd.set_detect_anomaly(False)
+    gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
+    gaussians_ed = get_gaussians(ed_path, from_chk=True).cancel_grads()
+
+    am = GMMArtModel(gaussians_st, num_movable)
+    am.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path)
+    am.set_init_params(out_path, scaling_modifier=10)
+    t, r = am.train(gt_gaussians=gaussians_ed)
+
+    ppp = am.get_ppp().detach().cpu().numpy()
+    part_indices = np.argmax(ppp, axis=1)
+    mpp = am.get_prob.detach().cpu().numpy()
+    mask = (mpp > thr)
+
+    gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
+    gaussians_st[part_indices == 0].save_ply(os.path.join(out_path, 'point_cloud/iteration_19/point_cloud.ply'))
+    for i in range(num_movable):
+        gaussians_st[mask & (part_indices == i)].save_ply(
+            os.path.join(out_path, f'point_cloud/iteration_{21 + i}/point_cloud.ply')
+        )
+    gaussians_st[~mask].save_ply(os.path.join(out_path, 'point_cloud/iteration_20/point_cloud.ply'))
+    np.save(os.path.join(out_path, 'r_pre.npy'), [rr.detach().cpu().numpy() for rr in r])
+    np.save(os.path.join(out_path, 't_pre.npy'), [tt.detach().cpu().numpy() for tt in t])
     np.save(os.path.join(out_path, 'mask_pre.npy'), mask)
     np.save(os.path.join(out_path, 'part_indices_pre'), part_indices)
 
@@ -227,7 +283,8 @@ if __name__ == '__main__':
     # mp_training_demo(out, st, ed, data, num_movable=K)
     # mp_joint_optimization_demo(out, st, data, num_movable=K)
 
-    mp_mp_optim_demo(out, st, ed, data, num_movable=K)
-    # mp_training_demo_v2(out, st, ed, data, num_movable=K)
+    # init_demo(out, st, ed, data, num_movable=K)
+    # gmm_am_optim_demo(out, st, ed, data, num_movable=K)
+    mp_joint_optimization_demo(out, st, data, num_movable=K)
 
     pass

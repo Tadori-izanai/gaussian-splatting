@@ -16,7 +16,8 @@ from gaussian_renderer import render
 from arguments import GroupParams
 from scene.gaussian_model import GaussianModel
 from scene import BWScenes
-from utils.general_utils import quat_mult, mat2quat, inverse_sigmoid, inverse_softmax
+from utils.general_utils import quat_mult, mat2quat, inverse_sigmoid, inverse_softmax, \
+    strip_symmetric, build_scaling_rotation, eval_quad, decompose_covariance_matrix, build_rotation
 from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd, \
     eval_knn_opacities_collision_loss, eval_opacity_bce_loss, eval_depth_loss
 from train import prepare_output_and_logger
@@ -132,97 +133,197 @@ class MPArtModelBasic:
     def train(self, gt_gaussians=None):
         pass
 
-class OptimOMP(MPArtModelBasic):
-    """
-    Optimization only on motion parameters.
-    """
+class GMMArtModel(MPArtModelBasic):
     def setup_args_extra(self):
-        # self.opt.iterations = 9000
         self.opt.iterations = 15000
         self.opt.warmup_until_iter = 1000
         self.opt.cd_from_iter = self.opt.warmup_until_iter + 1
-        self.opt.cd_until_iter = 9000
+        self.opt.cd_until_iter = 7000
 
-        self.opt.cd_weight = None
-        # self.opt.cd_weight = 1.0
-        # self.opt.depth_weight = None
-        # self.opt.depth_weight = None
-        self.opt.depth_weight = 0.1
-        # self.opt.rgb_weight = 0
-        self.opt.rgb_weight = 0.1
+        # self.opt.column_lr = 0.005
+        # self.opt.t_lr = 0.00005
+        self.opt.prob_lr = 0.05
+        self.opt.position_lr = 0.00016
+        self.opt.scaling_lr = 0.005
+        self.opt.opacity_lr = 0.05
+
+        self.opt.cd_weight = 1.0
+        self.opt.depth_weight = 1.0
 
         self.opt.mask_thresh = .85
-        self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
+        # self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
+        self.opt.trace_r_thresh = 1 + 2 * math.cos(10 / 180 * math.pi)
 
     def __init__(self, gaussians: GaussianModel, num_movable: int):
         super().__init__(gaussians, num_movable)
-        self.mpp = None
-        self.ppp = None
+        self._prob = nn.Parameter(
+            torch.zeros(gaussians.size(), dtype=torch.float, device='cuda').requires_grad_(True)
+        )
+        # GMM parameters below
+        self._xyz = nn.Parameter(
+            torch.zeros(self.num_movable, 3, dtype=torch.float, device='cuda').requires_grad_(True)
+        )
+        self._scaling = nn.Parameter(
+            torch.zeros(self.num_movable, 3, dtype=torch.float, device='cuda').requires_grad_(True)
+        )
+        self._rotation_col1 = nn.Parameter(
+            torch.tensor([1, 0, 0], dtype=torch.float, device='cuda').repeat(num_movable, 1).requires_grad_(True)
+        )
+        self._rotation_col2 = nn.Parameter(
+            torch.tensor([0, 1, 0], dtype=torch.float, device='cuda').repeat(num_movable, 1).requires_grad_(True)
+        )
+        self._opacity = nn.Parameter(
+            torch.zeros(num_movable, dtype=torch.float, device='cuda').requires_grad_(True)
+        )
+
+        def build_inverse_covariance_from_scaling_rotation(scaling, rot_col1, rot_col2):
+            ss = torch.diag_embed(1 / (scaling + 1e-8))
+            rr = torch.ones(self.num_movable, 3, 3, dtype=rot_col1.dtype, device=rot_col1.device)
+            for i in range(self.num_movable):
+                rr[i] = self.gram_schmidt(rot_col1[i], rot_col2[i])
+            return rr @ ss @ ss @ rr.transpose(1, 2)
+
+        self.prob_activation = torch.sigmoid
+        self.scaling_activation = torch.exp
+        self.scaling_inverse_activation = torch.log
+        self.inverse_covariance_activation = build_inverse_covariance_from_scaling_rotation
+        self.opacity_activation = torch.sigmoid
+
         self.original_xyz = self.gaussians.get_xyz.clone().detach()
         self.original_rotation = self.gaussians.get_rotation.clone().detach()
         self.original_opacity = self.gaussians.get_opacity.clone().detach()
         self.is_revolute = np.array([True for _ in range(self.num_movable)])
+
+        self.gaussians.duplicate(self.num_movable + 1)
         self.setup_args_extra()
 
-    @override
-    def set_dataset(self, source_path: str, model_path: str, evaluate=True):
-        self.dataset.eval = evaluate
-        self.dataset.source_path = source_path
-        self.dataset.model_path = model_path
-
-        mpp = np.load(os.path.join(model_path, 'mpp_init.npy'))
-        ppp = np.load(os.path.join(model_path, 'ppp_init.npy'))
-        self.mpp = torch.tensor(mpp, device='cuda')
-        self.ppp = torch.tensor(ppp, device='cuda')
+    @property
+    def get_prob(self):
+        return self.prob_activation(self._prob)
 
     @property
-    def part_indices(self):
-        return torch.argmax(self.ppp, dim=1)
+    def get_mu(self):
+        return self._xyz
 
     @property
-    def mask(self):
-        return self.mpp > self.opt.mask_thresh
+    def get_scaling(self):
+        return self.scaling_activation(self._scaling)
+
+    @property
+    def get_opacity(self):
+        return self.opacity_activation(self._opacity)
+
+    @property
+    def get_inverse_covariance(self):
+        return self.inverse_covariance_activation(self.get_scaling, self._rotation_col1, self._rotation_col2)
+
+    def get_ppp(self):
+        quad = eval_quad(self.original_xyz.unsqueeze(1) - self.get_mu, self.get_inverse_covariance)
+        ppp = self.get_opacity * torch.exp(-quad)
+        return ppp / (ppp.sum(dim=1, keepdim=True) + 1e-10)
+
+    def pred_mp(self):
+        return torch.argmax(self.get_ppp(), dim=1)
+
+    def _set_init_probabilities(self, prob=None, mu=None, sigma=None, scaling_modifier=1.0, eps=1e-6):
+        if prob is not None:
+            prob_raw = inverse_sigmoid(torch.clamp(prob, eps, 1 - eps))
+            self._prob = prob_raw.clone().detach().to('cuda').requires_grad_(True)
+        if mu is not None:
+            self._xyz = mu.clone().detach().to('cuda').requires_grad_(True)
+        if sigma is not None:
+            scaling, rotation = decompose_covariance_matrix(sigma)
+            scaling_raw = self.scaling_inverse_activation(scaling_modifier * scaling)
+            scaling_raw = torch.clamp(scaling_raw, -16, 16)
+            self._scaling = scaling_raw.clone().detach().to('cuda').requires_grad_(True)
+            self._rotation_col1 = rotation[:, :, 0].clone().detach().to('cuda').requires_grad_(True)
+            self._rotation_col2 = rotation[:, :, 1].clone().detach().to('cuda').requires_grad_(True)
+
+    def set_init_params(self, model_path: str, scaling_modifier=1.0):
+        prob = torch.tensor(np.load(os.path.join(model_path, 'mpp_init.npy')), device='cuda')
+        mu = torch.tensor(np.load(os.path.join(model_path, 'mu_init.npy')), device='cuda')
+        sigma = torch.tensor(np.load(os.path.join(model_path, 'sigma_init.npy')), device='cuda')
+        self._set_init_probabilities(prob, mu, sigma, scaling_modifier)
 
     @override
     def deform(self):
+        num = self.gaussians.size() // (self.num_movable + 1)
         t = self.get_t
         r = self.get_r
+        prob = self.get_prob.unsqueeze(-1)
+        ppp = self.get_ppp().unsqueeze(-1)
+
         for k in range(self.num_movable):
-            msk = self.mask & (self.part_indices == k)
+            indices = slice(num * (k + 1), num * (k + 2))
             r_inv_quat = mat2quat(r[k].transpose(1, 0))
-            self.gaussians.get_xyz[msk] = torch.matmul(self.original_xyz[msk], r[k]) + t[k]
-            self.gaussians.get_rotation_raw[msk] = quat_mult(r_inv_quat, self.original_rotation[msk])
+            self.gaussians.get_xyz[indices] = torch.matmul(self.original_xyz, r[k]) + t[k]
+            self.gaussians.get_rotation_raw[indices] = quat_mult(r_inv_quat, self.original_rotation)
+            self.gaussians.get_opacity_raw[indices] = inverse_sigmoid(self.original_opacity * prob * ppp[:, k])
+        self.gaussians.get_opacity_raw[:num] = inverse_sigmoid((1 - prob) * self.original_opacity)
         return self.gaussians
 
+    @override
+    def training_setup(self, training_args):
+        l = [
+            {'params': self._column_vec1, 'lr': training_args.column_lr, "name": "column_vec1"},
+            {'params': self._column_vec2, 'lr': training_args.column_lr, "name": "column_vec2"},
+            {'params': self._t, 'lr': training_args.t_lr * self.gaussians.spatial_lr_scale, "name": "t"},
+            {'params': [self._prob], 'lr': training_args.prob_lr, "name": "prob"},
+            {'params': [self._xyz], 'lr': training_args.position_lr * self.gaussians.spatial_lr_scale, "name": "xyz"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation_col1], 'lr': training_args.column_lr, "name": "rotation_col1"},
+            {'params': [self._rotation_col2], 'lr': training_args.column_lr, "name": "rotation_col2"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+        ]
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        self._prob.requires_grad_(False)
+        self._xyz.requires_grad_(False)
+        self._scaling.requires_grad_(False)
+        self._rotation_col1.requires_grad_(False)
+        self._rotation_col2.requires_grad_(False)
+        self._opacity.requires_grad_(False)
+
     def _show_losses(self, iteration: int, losses: dict):
-        if iteration in [1000, 5000, 9000]:
+        if iteration in [1000, 5000, 9000, 15000]:
             self.gaussians.save_ply(
-                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration}/point_cloud.ply')
+                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration}/point_cloud.ply'),
+                prune=False
             )
 
-        if iteration not in [2, 20, 50, 200, 500, 1000, 3000, 5000, 7000, 9000, 15000]:
+        if iteration not in [1, 20, 50, 200, 500, 1000, 2000, 5000, 7000, 9000, 15000]:
             return
         loss_msg = f"\niteration {iteration}:"
         for name, loss in losses.items():
             if loss is not None:
                 loss_msg += f"  {name} {loss.item():.{7}f}"
         print(loss_msg)
-        for k in range(self.num_movable):
+        for k in np.arange(self.num_movable):
             print(f't{k}:', self.get_t[k].detach().cpu().numpy())
             print(f'r{k}:', self.get_r[k].detach().cpu().numpy())
         print()
 
-    def _eval_losses(self, iteration: int, render_pkg, viewpoint_cam, gaussians, gt_gaussians=None):
+    def _eval_losses(self, render_pkg, viewpoint_cam, gaussians, gt_gaussians=None, requires_cd=False):
         gt_image = viewpoint_cam.original_image.cuda()
         losses = {
-            'rgb': eval_img_loss(render_pkg['render'], gt_image, self.opt),
+            'im': eval_img_loss(render_pkg['render'], gt_image, self.opt),
+            'bce': None,
             'd': None,
-            'cd': None,
         }
-        loss = self.opt.rgb_weight * losses['rgb']
-        requires_cd = (self.opt.cd_from_iter <= iteration <= self.opt.cd_until_iter)
+        loss = losses['im']
         if (self.opt.cd_weight is not None) and (gt_gaussians is not None) and requires_cd:
-            losses['cd'] = eval_cd_loss_sd(gaussians, gt_gaussians)
+            num = gaussians.size() // (1 + self.num_movable)
+            mp_indices = self.pred_mp()
+            definite_gaussians = GaussianModel(0)
+            pc_lst = [
+                gaussians.get_xyz[num * (k + 1) : num * (k + 2)][
+                    (self.get_prob > self.opt.mask_thresh) & (mp_indices == k)
+                ] for k in np.arange(self.num_movable)
+            ]
+            # if self.is_revolute.all():
+            #     pc_lst.append(gaussians.get_xyz[:num][self.get_prob < (1 - self.opt.mask_thresh)])
+            pc_lst.append(gaussians.get_xyz[:num][self.get_prob < (1 - self.opt.mask_thresh)])
+            definite_gaussians.get_xyz = torch.cat(pc_lst, dim=0)
+            losses['cd'] = eval_cd_loss_sd(definite_gaussians, gt_gaussians)
             loss += self.opt.cd_weight * losses['cd']
         if (self.opt.depth_weight is not None) and (viewpoint_cam.image_depth is not None):
             gt_depth = viewpoint_cam.image_depth.cuda()
@@ -234,18 +335,19 @@ class OptimOMP(MPArtModelBasic):
     def train(self, gt_gaussians=None):
         _ = prepare_output_and_logger(self.dataset)
         iterations = self.opt.iterations
-        self.training_setup(self.opt)
         bws = BWScenes(self.dataset, self.gaussians, is_new_gaussians=False)
+        self.training_setup(self.opt)
 
-        ema_loss_for_log = 0.0
         progress_bar = tqdm(range(iterations), desc="Training progress")
+        ema_loss_for_log = 0.0
         for i in range(1, iterations + 1):
+            requires_cd = self.opt.cd_from_iter <= i <= self.opt.cd_until_iter
             self.deform()
 
             # Pick a random Camera
             viewpoint_cam, background = bws.pop_black() if (i % 2 == 0) else bws.pop_white()
             render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, background)
-            loss, losses = self._eval_losses(i, render_pkg, viewpoint_cam, self.gaussians, gt_gaussians)
+            loss, losses = self._eval_losses(render_pkg, viewpoint_cam, self.gaussians, gt_gaussians, requires_cd=requires_cd)
             loss.backward()
 
             with torch.no_grad():
@@ -257,22 +359,32 @@ class OptimOMP(MPArtModelBasic):
                 if i < iterations:
                     self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
+                    self._prob[:] = torch.clamp(self._prob, -16, 16)
+                    self._opacity[:] = torch.clamp(self._opacity, -16, 16)
+                    self._scaling[:] = torch.clamp(self._scaling, -16, 16)
+                    self.gaussians.get_opacity_raw = self.gaussians.get_opacity_raw.detach()
                     self.gaussians.get_xyz = self.gaussians.get_xyz.detach()
                     self.gaussians.get_rotation_raw = self.gaussians.get_rotation_raw.detach()
 
                 if i == self.opt.warmup_until_iter:
-                    print()
-                    for k in range(self.num_movable):
-                        self.is_revolute[k] = torch.trace(self.get_r[k]) < self.opt.trace_r_thresh
-                        print(f'Detected part{k} is ' + ('*REVOLUTE*.' if self.is_revolute[k] else '*PRISMATIC*.'))
+                    print('')
+                    for k in np.arange(self.num_movable):
+                        self.is_revolute[k] = (torch.trace(self.get_r[k]) < self.opt.trace_r_thresh)
+                        print(f'Detected part{k} is ' + ('REVOLUTE' if self.is_revolute[k] else 'PRISMATIC'))
                         if self.is_revolute[k]:
                             continue
-                        # self._column_vec1[k] = nn.Parameter(
-                        #     torch.tensor([1, 0, 0], dtype=torch.float, device='cuda').requires_grad_(False)
-                        # )
-                        # self._column_vec2[k] = nn.Parameter(
-                        #     torch.tensor([0, 1, 0], dtype=torch.float, device='cuda').requires_grad_(False)
-                        # )
+                        self._column_vec1[k] = nn.Parameter(
+                            torch.tensor([1, 0, 0], dtype=torch.float, device='cuda').requires_grad_(False)
+                        )
+                        self._column_vec2[k] = nn.Parameter(
+                            torch.tensor([0, 1, 0], dtype=torch.float, device='cuda').requires_grad_(False)
+                        )
+                    self._prob.requires_grad_(True)
+                    self._xyz.requires_grad_(True)
+                    self._scaling.requires_grad_(True)
+                    self._rotation_col1.requires_grad_(True)
+                    self._rotation_col2.requires_grad_(True)
+                    self._opacity.requires_grad_(True)
             self._show_losses(i, losses)
         progress_bar.close()
         return self.get_t, self.get_r
@@ -372,7 +484,7 @@ class MPArtModel(MPArtModelBasic):
                 os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration}/point_cloud.ply')
             )
 
-        if iteration not in [2, 20, 50, 200, 500, 1000, 2000, 5000, 7000, 9000, 15000]:
+        if iteration not in [1, 20, 50, 200, 500, 1000, 2000, 5000, 7000, 9000, 15000]:
             return
         loss_msg = f"\niteration {iteration}:"
         for name, loss in losses.items():
@@ -465,65 +577,6 @@ class MPArtModel(MPArtModelBasic):
             self._show_losses(i, losses)
         progress_bar.close()
         return self.get_t, self.get_r
-
-class MPArtModelII(MPArtModel):
-    def __init__(self, gaussians: GaussianModel, num_movable: int):
-        super().__init__(gaussians, num_movable)
-
-    @override
-    def set_dataset(self, source_path: str, model_path: str, evaluate=True):
-        self.dataset.eval = evaluate
-        self.dataset.source_path = source_path
-        self.dataset.model_path = model_path
-
-        mpp = torch.tensor(np.load(os.path.join(model_path, 'mpp_init.npy')), device='cuda')
-        ppp = torch.tensor(np.load(os.path.join(model_path, 'ppp_init.npy')), device='cuda')
-        self.set_init_probabilities(prob=mpp, ppp=ppp)
-
-    @override
-    def deform(self):
-        t = self.get_t
-        r = self.get_r
-        prob = self.get_prob.unsqueeze(-1)
-        ppp = self.get_ppp.unsqueeze(-1)
-
-        self.gaussians.get_xyz[:] = self.original_xyz * (1 - prob)
-        self.gaussians.get_rotation_raw[:] = self.original_rotation * (1 - prob)
-        for k in range(self.num_movable):
-            r_inv_quat = mat2quat(r[k].transpose(1, 0))
-            self.gaussians.get_xyz[:] += (torch.matmul(self.original_xyz, r[k]) + t[k]) * prob * ppp[:, k]
-            self.gaussians.get_rotation_raw[:] += quat_mult(r_inv_quat, self.original_rotation) * prob * ppp[:, k]
-        return self.gaussians
-
-    @override
-    def training_setup(self, training_args):
-        l = [
-            {'params': self._column_vec1, 'lr': training_args.column_lr, "name": "column_vec1"},
-            {'params': self._column_vec2, 'lr': training_args.column_lr, "name": "column_vec2"},
-            {'params': self._t, 'lr': training_args.t_lr * self.gaussians.spatial_lr_scale, "name": "t"},
-            {'params': [self._prob], 'lr': training_args.prob_lr, "name": "prob"},
-            {'params': [self._ppp], 'lr': training_args.prob_lr, "name": "ppp"}
-        ]
-        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
-
-    @override
-    def _eval_losses(self, render_pkg, viewpoint_cam, gaussians, gt_gaussians=None, requires_cd=False):
-        gt_image = viewpoint_cam.original_image.cuda()
-        losses = {
-            'im': eval_img_loss(render_pkg['render'], gt_image, self.opt),
-            'cd': None,
-            'd': None,
-        }
-        loss = losses['im']
-        if (self.opt.depth_weight is not None) and (viewpoint_cam.image_depth is not None):
-            gt_depth = viewpoint_cam.image_depth.cuda()
-            losses['d'] = eval_depth_loss(render_pkg['depth'], gt_depth)
-            loss += self.opt.depth_weight * losses['d']
-        if (self.opt.cd_weight is not None) and (gt_gaussians is not None) and requires_cd:
-            losses['cd'] = eval_cd_loss_sd(gaussians, gt_gaussians)
-            loss += self.opt.cd_weight * losses['cd']
-        return loss, losses
-
 
 class MPArtModelJoint(MPArtModelBasic):
     def setup_args_extra(self):
