@@ -33,11 +33,14 @@ from scene.art_models import ArticulationModel
 from scene.multipart_models import MPArtModel, MPArtModelJoint, GMMArtModel
 from scene.multipart_misc import  OptimOMP, MPArtModelII
 
-from main_utils import train_single, get_gaussians, print_motion_params, get_gt_motion_params, plot_hist, \
-    mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, get_gt_motion_params_mp, eval_init_gmm_params, \
+from main_utils import train_single, get_gaussians, print_motion_params, plot_hist, \
+    mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, eval_init_gmm_params, \
     modify_scaling
+from metric_utils import get_gt_motion_params, interpret_transforms, eval_axis_metrics, \
+    get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics
 
 from misc import mp_training_demo_v2, mp_mp_optim_demo
+from render import render_depth_for_pcd
 
 def train_single_demo(path, data_path):
     dataset, pipes, opt = get_default_args()
@@ -174,7 +177,7 @@ def mp_training_demo(out_path: str, st_path: str, ed_path: str, data_path: str, 
     np.save(os.path.join(out_path, 'part_indices_pre'), part_indices)
 
 def gmm_am_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int, thr=0.85):
-    # torch.autograd.set_detect_anomaly(False)
+    torch.autograd.set_detect_anomaly(False)
     gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
     gaussians_ed = get_gaussians(ed_path, from_chk=True).cancel_grads()
 
@@ -242,6 +245,30 @@ def mp_joint_optimization_demo(out_path: str, st_path: str, data_path: str, num_
     np.save(os.path.join(out_path, 'mask_final.npy'), mask.detach().cpu().numpy())
     np.save(os.path.join(out_path, 'part_indices_final'), part_indices.detach().cpu().numpy())
 
+def eval_demo(out_path: str, data_path: str, num_movable: int, reverse=True):
+    t = np.load(os.path.join(out_path, 't_final.npy'))
+    r = np.load(os.path.join(out_path, 'r_final.npy'))
+    print(t)
+    print(r)
+
+    trans_pred = interpret_transforms(t, r)
+    with open(os.path.join(out_path, 'trans_pred.json'), 'w') as outfile:
+        json.dump(trans_pred, outfile, indent=4)
+
+    with open(os.path.join(data_path, 'trans.json'), 'r') as json_file:
+        trans = json.load(json_file)
+    trans_gt = trans['trans_info']
+    if isinstance(trans_gt, dict):
+        trans_gt = [trans_gt]
+
+    pcd_pred = get_pred_point_cloud(out_path, K=num_movable)
+    pcd_gt = get_gt_point_clouds(os.path.join(data_path, 'gt/'), K=num_movable, reverse=reverse)
+
+    metrics_axis = eval_axis_metrics(trans_pred, trans_gt)
+    metrics_cd = eval_geo_metrics(pcd_pred, pcd_gt)
+    with open(os.path.join(out_path, 'metrics.json'), 'w') as outfile:
+        json.dump(metrics_axis | metrics_cd, outfile, indent=4)
+
 if __name__ == '__main__':
     # st = 'output/tmp/ust'
     # ed = 'output/tmp/ued'
@@ -269,22 +296,34 @@ if __name__ == '__main__':
     ed = 'output/storage_ed'
     data = 'data/dta_multi/storage_47254'
     out = 'output/storage'
+    rev = True
 
     # st = 'output/fridge_st'
     # ed = 'output/fridge_ed'
     # data = 'data/dta_multi/fridge_10489'
     # out = 'output/fridge'
+    # rev = True
 
-    get_gt_motion_params_mp(data, reverse=True)
+    # K = 1
+    # st = 'output/usb_st'
+    # ed = 'output/usb_ed'
+    # data = 'data/dta/USB_100109'
+    # out = 'output/usb'
+    # rev = False
+
+    # st = 'output/blade_st'
+    # ed = 'output/blade_ed'
+    # data = 'data/dta/blade_103706'
+    # out = 'output/blade'
+    # rev = False
+
+    get_gt_motion_params(data, reverse=rev)
 
     # train_single_demo(st, os.path.join(data, 'start'))
     # train_single_demo(ed, os.path.join(data, 'end'))
-    # init_pp_demo(out, st, ed, data, num_movable=K)
-    # mp_training_demo(out, st, ed, data, num_movable=K)
-    # mp_joint_optimization_demo(out, st, data, num_movable=K)
-
     # init_demo(out, st, ed, data, num_movable=K)
     # gmm_am_optim_demo(out, st, ed, data, num_movable=K)
-    mp_joint_optimization_demo(out, st, data, num_movable=K)
+    # mp_joint_optimization_demo(out, st, data, num_movable=K)
+    eval_demo(out, data, num_movable=K, reverse=rev)
 
     pass

@@ -99,6 +99,9 @@ class MPArtModelBasic:
 
     @property
     def get_r(self):
+        """
+        r is actually the transpose of the rotation matrix !!!
+        """
         return [self.r_activation(self._column_vec1[k], self._column_vec2[k]) for k in range(self.num_movable)]
 
     def set_init_params(self, t, r):
@@ -379,12 +382,13 @@ class GMMArtModel(MPArtModelBasic):
                         self._column_vec2[k] = nn.Parameter(
                             torch.tensor([0, 1, 0], dtype=torch.float, device='cuda').requires_grad_(False)
                         )
+                    if self.num_movable > 1:
+                        self._xyz.requires_grad_(True)
+                        self._scaling.requires_grad_(True)
+                        self._rotation_col1.requires_grad_(True)
+                        self._rotation_col2.requires_grad_(True)
+                        self._opacity.requires_grad_(True)
                     self._prob.requires_grad_(True)
-                    self._xyz.requires_grad_(True)
-                    self._scaling.requires_grad_(True)
-                    self._rotation_col1.requires_grad_(True)
-                    self._rotation_col2.requires_grad_(True)
-                    self._opacity.requires_grad_(True)
             self._show_losses(i, losses)
         progress_bar.close()
         return self.get_t, self.get_r
@@ -583,20 +587,20 @@ class MPArtModelJoint(MPArtModelBasic):
         self.opt.densify_grad_threshold = 0.0002
         self.opt.min_opacity = 0.005
 
-        # self.opt.iterations = 9_000
-        self.opt.iterations = 14_000
+        self.opt.iterations = 9_000
+        # self.opt.iterations = 14_000
         self.opt.densification_interval = 50
         self.opt.opacity_reset_interval = 2000
         self.opt.densify_from_iter = 50
-        # self.opt.densify_until_iter = 6_000
-        self.opt.densify_until_iter = 11_000
+        self.opt.densify_until_iter = 6_000
+        # self.opt.densify_until_iter = 11_000
 
         self.opt.collision_knn = 32
         self.opt.collision_weight = 0.02
-        # self.opt.collision_from_iter = 1
-        self.opt.collision_from_iter = 5000
-        # self.opt.collision_until_iter = 10000
-        self.opt.collision_until_iter = self.opt.iterations
+        self.opt.collision_from_iter = 1
+        # self.opt.collision_from_iter = 5000
+        self.opt.collision_until_iter = 10000
+        # self.opt.collision_until_iter = self.opt.iterations
         self.opt.collision_after_reset_iter = 500
 
         self.opt.depth_weight = 1.0
@@ -706,6 +710,12 @@ class MPArtModelJoint(MPArtModelBasic):
         progress_bar = tqdm(range(iterations), desc="Training progress")
         prev_opacity_reset_iter = -114514
         for i in range(1, iterations + 1):
+            if i == self.opt.collision_from_iter:
+                for k in range(self.num_movable):
+                    self._t[k].requires_grad_(False)
+                    self._column_vec1[k].requires_grad_(False)
+                    self._column_vec2[k].requires_grad_(False)
+
             # Pick a random Camera from st and ed respectively
             viewpoint_cam_st, background_st = bws_st.pop_black() if (i % 2 == 0) else bws_st.pop_white()
             viewpoint_cam_ed, background_ed = bws_ed.pop_black() if (i % 2 == 0) else bws_ed.pop_white()
@@ -763,11 +773,11 @@ class MPArtModelJoint(MPArtModelBasic):
                     progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
                     progress_bar.update(10)
 
-                if i == self.opt.collision_from_iter:
-                    for k in range(self.num_movable):
-                        self._t[k].requires_grad_(False)
-                        self._column_vec1[k].requires_grad_(False)
-                        self._column_vec2[k].requires_grad_(False)
+                # if i == self.opt.collision_from_iter:
+                #     for k in range(self.num_movable):
+                #         self._t[k].requires_grad_(False)
+                #         self._column_vec1[k].requires_grad_(False)
+                #         self._column_vec2[k].requires_grad_(False)
 
                 # Densification
                 if i < self.opt.densify_until_iter:

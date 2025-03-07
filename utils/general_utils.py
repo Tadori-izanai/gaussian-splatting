@@ -16,8 +16,13 @@ import numpy as np
 import random
 from scipy.spatial import KDTree
 from scipy.stats import gaussian_kde
+from plyfile import PlyData
 
 from pytorch3d.loss import chamfer_distance
+from pytorch3d.io import load_ply, load_obj
+from pytorch3d.ops import sample_points_from_meshes
+from pytorch3d.structures import Meshes
+
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -339,3 +344,72 @@ def decompose_covariance_matrix(cov: torch.tensor) -> tuple[torch.tensor, torch.
         torch.relu(eigenvalues)
     )  # Use relu to handle potential numerical issues with negative eigenvalues
     return scaling_values, rotation_matrices
+
+def get_rotation_axis(r: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    r = r.T
+    eigenvalues, eigenvectors = np.linalg.eig(r)
+    axis = None
+    for i in range(3):
+        if np.isclose(eigenvalues[i].real, 1.0):
+            axis = eigenvectors[:, i].real
+            break
+    if axis is None:
+        return None, None
+
+    axis = axis / np.linalg.norm(axis)
+
+    a = np.eye(3) - r
+    # point_on_axis = -np.linalg.pinv(r - np.eye(3)) @ t
+    point_on_axis = np.linalg.lstsq(a, t, rcond=None)[0]
+    return point_on_axis, axis
+
+def rotation_matrix_from_axis_angle(axis: np.array, angle: float):
+    """
+    Constructs a rotation matrix from a rotation axis and angle.
+
+    Args:
+        axis: Unit vector representing the rotation axis.
+        angle: Rotation angle in radians.
+
+    Returns:
+        R: 3x3 rotation matrix.
+    """
+    axis = axis / np.linalg.norm(axis) #ensure axis is a unit vector.
+    K = np.array([[0, -axis[2], axis[1]],
+                  [axis[2], 0, -axis[0]],
+                  [-axis[1], axis[0], 0]])
+    I = np.eye(3)
+    R = I + np.sin(angle) * K + (1 - np.cos(angle)) * np.dot(K, K)
+    return R
+
+def load_mesh(path):
+    if path.endswith('.ply'):
+        verts, faces = load_ply(path)
+    elif path.endswith('.obj'):
+        obj = load_obj(path)
+        verts = obj[0]
+        faces = obj[1].verts_idx
+    return verts, faces
+
+def sample_points_from_ply(file_path: str, n_samples: int=100_000) -> np.ndarray:
+    """
+    Reads a .ply file and returns the point cloud as a NumPy array.
+    Args:
+        file_path: The path to the .ply file.
+        n_samples: #pts to sample
+    Returns:
+        A NumPy array of shape (N, 3) containing the 3D point positions, or None if an error occurs.
+    """
+    verts, faces = load_mesh(file_path)
+    mesh = Meshes(verts=[verts], faces=[faces])
+    pts = sample_points_from_meshes(mesh, num_samples=n_samples).squeeze(0)
+    return pts.cpu().numpy()
+
+def get_source_path(cfg_path: str) -> str:
+    with open(cfg_path, 'r') as f:
+        content = f.read()
+    # Split at 'source_path=' and take the second part
+    path_part = content.split('source_path=')[1]
+    # Split at next comma and take first part, remove quotes and whitespace
+    source_path = path_part.split(',')[0].strip("'").strip()
+    return source_path

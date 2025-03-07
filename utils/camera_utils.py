@@ -15,6 +15,8 @@ import numpy as np
 from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal
 
+import json
+
 WARNED = False
 
 def loadCam(args, id, cam_info, resolution_scale):
@@ -89,3 +91,67 @@ def camera_to_JSON(id, camera : Camera):
         'fx' : fov2focal(camera.FovX, camera.width)
     }
     return camera_entry
+
+def create_transforms_on_sphere(
+    output: str, radius: float, angle_x: float, num_points: int=100, num_points_down: int=37
+):
+    def get_hammersley(i: int, num: int) -> tuple[float, float]:
+        bits = ((i << 16) | (i >> 16)) & 0xFFFFFFFF
+        bits = (((bits & 0x55555555) << 1) | ((bits & 0xAAAAAAAA) >> 1)) & 0xFFFFFFFF
+        bits = (((bits & 0x33333333) << 2) | ((bits & 0xCCCCCCCC) >> 2)) & 0xFFFFFFFF
+        bits = (((bits & 0x0F0F0F0F) << 4) | ((bits & 0xF0F0F0F0) >> 4)) & 0xFFFFFFFF
+        bits = (((bits & 0x00FF00FF) << 8) | ((bits & 0xFF00FF00) >> 8)) & 0xFFFFFFFF
+        rdi = bits * 2.3283064365386963e-10
+        return float(i) / float(num), rdi
+
+    def get_random_points_on_hemisphere(num_pts: int) -> np.ndarray:
+        num_pts += 1
+        points = np.zeros((num_pts, 3))
+        for i in np.arange(num_pts):
+            hx, hy = get_hammersley(i, num_pts)
+            phi = 2 * np.pi * hx
+            cos_theta = 1 - hy
+            points[i, 0] = np.cos(phi) * np.sqrt(1 - cos_theta * cos_theta)
+            points[i, 1] = np.sin(phi) * np.sqrt(1 - cos_theta * cos_theta)
+            points[i, 2] = cos_theta
+        return points[1:]
+
+    def get_rotation(v: np.ndarray, u: np.ndarray) -> np.ndarray:
+        rotation = np.eye(4)
+        g = v / np.linalg.norm(v)
+        r = np.cross(g, u)
+        r /= np.linalg.norm(r)
+        t = np.cross(r, g)
+        t /= np.linalg.norm(t)
+        rotation[0, :3] = r
+        rotation[1, :3] = t
+        rotation[2, :3] = -g
+        return rotation
+
+    def get_translation(v: np.ndarray) -> np.ndarray:
+        translation = np.eye(4)
+        translation[:3, 3] = -v
+        return translation
+
+    def look_at(direction: np.ndarray, up: np.ndarray, eye: np.ndarray) -> np.ndarray:
+        translation = get_translation(eye)
+        rotation = get_rotation(direction, up)
+        return rotation @ translation
+
+    positions = get_random_points_on_hemisphere(num_points) * radius
+    if num_points_down > 0:
+        positions_down = -get_random_points_on_hemisphere(num_points_down) * radius
+        positions = np.concat([positions, positions_down], axis=0)
+    transformations = {
+        'camera_angle_x': angle_x,
+        'frames': []
+    }
+    for i, pos in enumerate(positions):
+        transformations['frames'].append(
+            {
+                'rotation': 0.0,
+                'transform_matrix': np.linalg.inv(look_at(-pos, np.array([0, 0, 1]), pos)).tolist()
+            }
+        )
+    with open(output, 'w', encoding='utf-8') as f:
+        json.dump(transformations, f, ensure_ascii=False, indent=4)

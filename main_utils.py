@@ -14,7 +14,8 @@ from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses, eval_img_loss, eval_opacity_bce_loss, eval_depth_loss
 from scene import BWScenes
 from scene.gaussian_model import GaussianModel
-from utils.general_utils import get_per_point_cd, otsu_with_peak_filtering, inverse_sigmoid, decompose_covariance_matrix
+from utils.general_utils import get_per_point_cd, otsu_with_peak_filtering, inverse_sigmoid, \
+    decompose_covariance_matrix, rotation_matrix_from_axis_angle
 
 def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, depth_weight=None):
     _ = prepare_output_and_logger(dataset)
@@ -41,7 +42,8 @@ def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, 
 
         if bce_weight is not None:
             loss += bce_weight * eval_opacity_bce_loss(gaussians.get_opacity)
-        if (depth_weight is not None) and (viewpoint_cam.image_depth is not None) and (i > opt.opacity_reset_interval):
+        # if (depth_weight is not None) and (viewpoint_cam.image_depth is not None) and (i > opt.opacity_reset_interval):
+        if (depth_weight is not None) and (viewpoint_cam.image_depth is not None):
             depth = render_pkg['depth']
             gt_depth = viewpoint_cam.image_depth.cuda()
             loss += depth_weight * eval_depth_loss(depth, gt_depth)
@@ -106,59 +108,6 @@ def plot_hist(x: torch.Tensor, path: str, bins=100):
     plt.figure()
     plt.hist(x.detach().cpu().numpy(), bins=bins)
     plt.savefig(path)
-
-def get_gt_motion_params(data_path: str):
-    r = np.eye(3)
-    t = np.zeros(3)
-
-    with open(os.path.join(data_path, 'trans.json'), 'r') as json_file:
-        trans = json.load(json_file)
-    trans_info = trans['trans_info']
-
-    if trans_info['type'] == 'translate':
-        direction = np.array(trans_info['axis']['d'])
-        distance = trans_info['translate']['r'] - trans_info['translate']['l']
-        t = direction * distance
-    elif trans_info['type'] == 'rotate':
-        c = np.array(trans_info['axis']['o'])
-        n = np.array(trans_info['axis']['d'])
-        n /= np.linalg.norm(n)
-        theta = (trans_info['rotate']['r'] - trans_info['rotate']['l']) / 180 * np.pi
-        r = np.eye(3) * np.cos(theta) + (1 - np.cos(theta)) * (n[:, np.newaxis] @ n[np.newaxis, :]) + np.sin(theta) * (
-            np.array([[0, -n[2], n[1]], [n[2], 0, -n[0]], [-n[1], n[0], 0]])
-        )
-        t = c - r @ c
-        r = r.T
-    else:
-        assert False
-    print('t:', t)
-    print('r:', r)
-    return t, r
-
-def get_gt_motion_params_mp(data_path: str, reverse=False):
-    with open(os.path.join(data_path, 'trans.json'), 'r') as json_file:
-        trans = json.load(json_file)
-    trans_infos = trans['trans_info']
-    for trans_info in trans_infos:
-        r = np.eye(3)
-        if trans_info['type'] == 'translate':
-            direction = np.array(trans_info['axis']['d'])
-            distance = trans_info['translate']['r'] - trans_info['translate']['l']
-            t = direction * distance
-        elif trans_info['type'] == 'rotate':
-            c = np.array(trans_info['axis']['o'])
-            n = np.array(trans_info['axis']['d'])
-            n /= np.linalg.norm(n)
-            theta = (trans_info['rotate']['r'] - trans_info['rotate']['l']) / 180 * np.pi
-            r = np.eye(3) * np.cos(theta) + (1 - np.cos(theta)) * (n[:, np.newaxis] @ n[np.newaxis, :]) + np.sin(theta) * (
-                np.array([[0, -n[2], n[1]], [n[2], 0, -n[0]], [-n[1], n[0], 0]])
-            )
-            t = c - r @ c
-            r = r.T
-        else:
-            assert False
-        print('t:', t if not reverse else -r.T @ t)
-        print('r:', r if not reverse else r.T)
 
 def mk_output_dir(out_path: str, data_path: str):
     os.makedirs(out_path, exist_ok=True)

@@ -14,7 +14,8 @@ import sys
 from PIL import Image
 from typing import NamedTuple
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
-    read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
+    read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text, \
+    get_pcd_from_depths
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 import numpy as np
 import json
@@ -297,11 +298,12 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
             print(f"Generating random point cloud ({num_pts})...")
             
             # We create random points inside the bounds of the synthetic Blender scenes
-            xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
-            shs = np.random.random((num_pts, 3)) / 255.0
-            pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
-
-            rgb = SH2RGB(shs) * 255
+            # xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+            # shs = np.random.random((num_pts, 3)) / 255.0
+            # pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+            #
+            # rgb = SH2RGB(shs) * 255
+            xyz, rgb = get_pcd_from_depths(train_cam_infos, num_pts)
 
         storePly(ply_path, xyz, rgb)
     try:

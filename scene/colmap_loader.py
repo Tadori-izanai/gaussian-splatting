@@ -12,6 +12,9 @@
 import numpy as np
 import collections
 import struct
+import random
+
+from utils.graphics_utils import getWorld2View, getProjectionMatrix
 
 CameraModel = collections.namedtuple(
     "CameraModel", ["model_id", "model_name", "num_params"])
@@ -292,3 +295,89 @@ def read_colmap_bin_array(path):
         array = np.fromfile(fid, np.float32)
     array = array.reshape((width, height, channels), order="F")
     return np.transpose(array, (1, 0, 2)).squeeze()
+
+def extract_world_pts(
+    depth_map: np.ndarray,
+    R: np.array,
+    T: np.array,
+    FovY: np.array,
+    FovX: np.array,
+    image_width: int,
+    image_height: int,
+    color_map: np.ndarray=None
+) -> tuple[list, list]:
+    zfar = 100.0
+    znear = 0.01
+    projection_matrix = getProjectionMatrix(znear, zfar, FovX, FovY, blender_convention=True).cpu().numpy()
+    inverse_projection = np.linalg.inv(projection_matrix)
+
+    w2c_colmap = getWorld2View(R, T)
+    c2w_colmap = np.linalg.inv(w2c_colmap)
+    c2w_blender = c2w_colmap.copy()
+    c2w_blender[:3, 1:3] *= -1
+    inverse_view = c2w_blender
+
+    # Create coordinate grids
+    x_coords, y_coords = np.meshgrid(np.arange(image_width), np.arange(image_height))
+
+    # Flatten coordinates and depth map
+    x_flat, y_flat = x_coords.flatten(), y_coords.flatten()
+    depth_flat = depth_map.flatten()
+
+    # Filter out zero depth values
+    valid_indices = (depth_flat > 1e-6)
+    thresh = np.percentile(depth_flat[valid_indices], 50)
+    valid_indices = (depth_flat > thresh)
+
+    x_valid, y_valid = x_flat[valid_indices], y_flat[valid_indices]
+    depth_valid = -depth_flat[valid_indices]
+
+    if color_map is not None:
+        color_map = np.array(color_map)
+        color_map = color_map.reshape((-1, 3))[valid_indices].tolist()
+    else:
+        color_map = []
+
+    # Normalized device coordinates (NDC)
+    ndc_x = (2.0 * x_valid / image_width) - 1.0
+    ndc_y = 1.0 - (2.0 * y_valid / image_height)
+    ndc_z = np.full_like(ndc_x, -1.0)  # Assume far plane
+    ndc_homogeneous = np.stack([ndc_x, ndc_y, ndc_z, np.ones_like(ndc_x)], axis=1)
+
+    # Camera space coordinates
+    camera_homogeneous = np.dot(ndc_homogeneous, inverse_projection.T)  # Transpose inverse_projection
+    camera_homogeneous /= camera_homogeneous[:, 3, np.newaxis]  # Perspective division
+    # Scale z by the depth value
+    camera_homogeneous[:, :3] *= (depth_valid / (camera_homogeneous[:, 2] + 1e-8))[:, np.newaxis]
+
+    # World space coordinates
+    world_homogeneous = np.dot(camera_homogeneous, inverse_view.T)  # Transpose inverse_view
+    world_coords = world_homogeneous[:, :3]
+    return world_coords.tolist(), color_map
+
+def get_pcd_from_depths(cam_infos: list, num_pts: int=100_000) -> tuple[np.ndarray, np.ndarray]:
+    world_coords = []
+    colors = []
+    for cam_info in cam_infos:
+        pts, rgb = extract_world_pts(
+            depth_map=cam_info.image_d,
+            R=cam_info.R,
+            T=cam_info.T,
+            FovX=cam_info.FovX,
+            FovY=cam_info.FovY,
+            image_width=cam_info.width,
+            image_height=cam_info.height,
+            color_map=cam_info.image,
+        )
+        world_coords += pts
+        colors += rgb
+        print(f"done with train camera {cam_info.uid}: got {len(pts)} pts")
+    print('done.\n')
+
+    if num_pts >= len(world_coords):
+        return np.array(world_coords), np.array(colors)
+
+    indices = random.sample(range(len(world_coords)), num_pts)
+    colors = np.array(colors)[indices] if len(colors) == len(world_coords) else np.array(colors)
+    world_coords = np.array(world_coords)[indices]
+    return world_coords, colors

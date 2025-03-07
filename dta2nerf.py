@@ -95,11 +95,11 @@ def convert_to_nerf(path: str, res_x: int, is_start_zero: bool) -> None:
 
 
 if __name__ == '__main__':
-    # data_path = 'data/dta/storage_45135'
-    # data_path = 'data/dta/USB_100109'
-    # data_path = 'data/dta/blade_103706'
-    # data_path = 'data/dta_multi/fridge_10489'
-    data_path = 'data/dta_multi/storage_47254'
+    # data_path = 'data/dta/storage_45135'  # False
+    # data_path = 'data/dta/USB_100109'  # True
+    # data_path = 'data/dta/blade_103706'  # True
+    # data_path = 'data/dta_multi/fridge_10489' # False
+    data_path = 'data/dta_multi/storage_47254'  # False
 
     gen_rgba_images(data_path)
     convert_to_nerf(data_path, res_x=800, is_start_zero=False)
