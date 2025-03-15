@@ -20,7 +20,12 @@ from utils.general_utils import quat_mult, mat2quat, inverse_sigmoid, inverse_so
     strip_symmetric, build_scaling_rotation, eval_quad, decompose_covariance_matrix, build_rotation
 from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd, \
     eval_knn_opacities_collision_loss, eval_opacity_bce_loss, eval_depth_loss
+from utils.system_utils import mkdir_p
+from utils.sh_utils import RGB2SH
 from train import prepare_output_and_logger
+
+from plyfile import PlyData, PlyElement
+
 
 class MPArtModelBasic:
     def setup_args(self):
@@ -154,8 +159,8 @@ class GMMArtModel(MPArtModelBasic):
         self.opt.depth_weight = 1.0
 
         self.opt.mask_thresh = .85
-        # self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
-        self.opt.trace_r_thresh = 1 + 2 * math.cos(10 / 180 * math.pi)
+        self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
+        # self.opt.trace_r_thresh = 1 + 2 * math.cos(10 / 180 * math.pi)
 
     def __init__(self, gaussians: GaussianModel, num_movable: int):
         super().__init__(gaussians, num_movable)
@@ -195,6 +200,7 @@ class GMMArtModel(MPArtModelBasic):
         self.original_xyz = self.gaussians.get_xyz.clone().detach()
         self.original_rotation = self.gaussians.get_rotation.clone().detach()
         self.original_opacity = self.gaussians.get_opacity.clone().detach()
+        self.original_gaussians = copy.deepcopy(self.gaussians)
         self.is_revolute = np.array([True for _ in range(self.num_movable)])
 
         self.gaussians.duplicate(self.num_movable + 1)
@@ -220,10 +226,11 @@ class GMMArtModel(MPArtModelBasic):
     def get_inverse_covariance(self):
         return self.inverse_covariance_activation(self.get_scaling, self._rotation_col1, self._rotation_col2)
 
-    def get_ppp(self):
+    def get_ppp(self, eps=1e-8):
         quad = eval_quad(self.original_xyz.unsqueeze(1) - self.get_mu, self.get_inverse_covariance)
         ppp = self.get_opacity * torch.exp(-quad)
-        return ppp / (ppp.sum(dim=1, keepdim=True) + 1e-10)
+        ppp = ppp.clamp(eps, 1 - eps)
+        return ppp / ppp.sum(dim=1, keepdim=True)
 
     def pred_mp(self):
         return torch.argmax(self.get_ppp(), dim=1)
@@ -264,6 +271,43 @@ class GMMArtModel(MPArtModelBasic):
             self.gaussians.get_opacity_raw[indices] = inverse_sigmoid(self.original_opacity * prob * ppp[:, k])
         self.gaussians.get_opacity_raw[:num] = inverse_sigmoid((1 - prob) * self.original_opacity)
         return self.gaussians
+
+    def save_ppp_vis(self, path: str):
+        mkdir_p(os.path.dirname(path))
+        colors = [
+            (1, 0, 0),
+            (0, 1, 0),
+            (0, 0, 1),
+            (1, 1, 0),
+            (1, 0, 1),
+            (0, 1, 1),
+        ]
+
+        ppp = self.get_ppp()
+        fused_color = torch.zeros(self.original_gaussians.size(), 3)
+        for k in range(self.num_movable):
+            c = torch.tensor(colors[k % len(colors)])
+            fused_color += ppp[:, k].unsqueeze(1).cpu() * c
+
+        features = torch.zeros((fused_color.shape[0], 3, (self.original_gaussians.max_sh_degree + 1) ** 2)).float().cuda()
+        features[:, :3, 0] = fused_color
+        features[:, 3:, 1:] = 0.0
+        features_dc = features[:,:,0:1].transpose(1, 2).contiguous()
+        features_rest = features[:,:,1:].transpose(1, 2).contiguous()
+
+        xyz = self.original_gaussians.get_xyz.detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        f_dc = features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self.original_gaussians.get_opacity_raw.detach().cpu().numpy()
+        scale = self.original_gaussians.get_scaling_raw.detach().cpu().numpy()
+        rotation = self.original_gaussians.get_rotation_raw.detach().cpu().numpy()
+
+        dtype_full = [(attribute, 'f4') for attribute in self.original_gaussians.construct_list_of_attributes()]
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        PlyData([PlyElement.describe(elements, 'vertex')]).write(path)
 
     @override
     def training_setup(self, training_args):
@@ -376,12 +420,12 @@ class GMMArtModel(MPArtModelBasic):
                         print(f'Detected part{k} is ' + ('REVOLUTE' if self.is_revolute[k] else 'PRISMATIC'))
                         if self.is_revolute[k]:
                             continue
-                        self._column_vec1[k] = nn.Parameter(
-                            torch.tensor([1, 0, 0], dtype=torch.float, device='cuda').requires_grad_(False)
-                        )
-                        self._column_vec2[k] = nn.Parameter(
-                            torch.tensor([0, 1, 0], dtype=torch.float, device='cuda').requires_grad_(False)
-                        )
+                        # self._column_vec1[k] = nn.Parameter(
+                        #     torch.tensor([1, 0, 0], dtype=torch.float, device='cuda').requires_grad_(False)
+                        # )
+                        # self._column_vec2[k] = nn.Parameter(
+                        #     torch.tensor([0, 1, 0], dtype=torch.float, device='cuda').requires_grad_(False)
+                        # )
                     if self.num_movable > 1:
                         self._xyz.requires_grad_(True)
                         self._scaling.requires_grad_(True)

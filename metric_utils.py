@@ -39,7 +39,7 @@ def interpret_transforms(translations: np.ndarray, rotations: np.ndarray) -> lis
     for t, r in zip(translations, rotations):
         trans_info = {}
         theta = np.acos((np.trace(r) - 1) / 2)
-        if theta < 1e-2:
+        if theta < 8e-2:
             trans_info['type'] = 'translate'
             trans_info['axis'] = {
                 'o': [0., 0., 0.],
@@ -106,7 +106,7 @@ def eval_axis_and_state(axis_a, axis_b):
         distance = line_distance(a_o, a_d, b_o, b_d)
 
         a_theta, b_theta = np.deg2rad(axis_a['rotate']), np.deg2rad(axis_b['rotate'])
-        if a_theta * b_theta < 0:
+        if (a_theta * a_d) @ (b_theta * b_d) < 0:
             b_theta = -b_theta
         a_r, b_r = rotation_matrix_from_axis_angle(a_d, a_theta), rotation_matrix_from_axis_angle(b_d, b_theta)
         r_diff = np.matmul(a_r, b_r.T)
@@ -201,11 +201,7 @@ def eval_geo_metrics(pred_pc: dict, gt_pc: dict) -> dict:
     return metric_dict
 
 if __name__ == '__main__':
-    # pts1 = sample_points_from_ply('data/dta_multi/storage_47254/gt/start/start_static_rotate.ply')
-    # pts2 = get_gaussian_surface_pcd('output/storage', 30)
-
     pts1 = sample_points_from_ply('data/dta_multi/storage_47254/gt/end/end_rotate.ply')
-    # pts2 = get_gaussian_surface_pcd('output/storage', 99999)
     pts2 = get_gaussian_surface_pcd('output/storage_st', 30000)
 
     pts3 = fetchPly('data/dta_multi/storage_47254/start/points3d.ply').points
