@@ -6,6 +6,7 @@ import torch
 from pytorch3d.loss import chamfer_distance
 from render import render_depth_for_pcd
 from utils.general_utils import get_rotation_axis, rotation_matrix_from_axis_angle, sample_points_from_ply
+from utils.loss_utils import sample_pts
 from scene.gaussian_model import GaussianModel
 from scene.colmap_loader import get_pcd_from_depths
 from scene.dataset_readers import storePly, fetchPly
@@ -134,20 +135,30 @@ def eval_axis_metrics(trans_pred: list[dict], trans_gt: list[dict]) -> dict:
         )
     return metric_dict
 
-def get_gaussian_surface_pcd(model_path: str, it: int, n_samples: int=100_000) -> np.ndarray:
-    return GaussianModel(0).load_ply(os.path.join(model_path, f'point_cloud/iteration_{it}/point_cloud.ply')
-                                     ).get_xyz.detach().cpu().numpy()
-    # pre_xyz = os.path.join(model_path, f'depth/ours_{it}.npy')
-    # try:
-    #     xyz = np.load(pre_xyz)
-    #     assert len(xyz) == n_samples
-    # except:
-    #     print(f'\nProcessing part {it}:')
-    #     cam_list = render_depth_for_pcd(model_path, it)
-    #     xyz, _ = get_pcd_from_depths(cam_list, num_pts=n_samples)
-    #     np.save(pre_xyz, xyz)
-    #     storePly(pre_xyz.replace('.npy', '.ply'), xyz, np.zeros_like(xyz))
-    # return xyz
+def get_gaussian_surface_pcd(model_path: str, it: int, n_samples: int=10_000) -> np.ndarray:
+    def from_gaussian_xyz():
+        xyz = GaussianModel(0).load_ply(
+            os.path.join(model_path, f'point_cloud/iteration_{it}/point_cloud.ply')).get_xyz.detach()
+        return sample_pts(xyz, n_samples).cpu().numpy()
+
+    def from_depth():
+        pre_xyz = os.path.join(model_path, f'depth/ours_{it}.npy')
+        try:
+            xyz = np.load(pre_xyz)
+            assert len(xyz) == n_samples
+        except:
+            print(f'\nProcessing part {it}:')
+            cam_list = render_depth_for_pcd(model_path, it)
+            xyz, _ = get_pcd_from_depths(cam_list, num_pts=n_samples)
+            np.save(pre_xyz, xyz)
+            storePly(pre_xyz.replace('.npy', '.ply'), xyz, np.zeros_like(xyz))
+        return xyz
+
+    def from_pgsr_mesh():
+        return sample_points_from_ply(os.path.join(model_path, f'mesh/tsdf_fusion_{it}.ply'), n_samples)
+
+    # return from_gaussian_xyz()
+    return from_pgsr_mesh()
 
 def get_pred_point_cloud(model_path: str, iters=30, K=1, n_samples: int=100_000) -> dict:
     static = get_gaussian_surface_pcd(model_path, iters, n_samples)
@@ -199,15 +210,3 @@ def eval_geo_metrics(pred_pc: dict, gt_pc: dict) -> dict:
     metric_dict['chamfer_static'] = compute_chamfer(pred_pc['static'], gt_pc['static'])
     metric_dict['chamfer_whole'] = compute_chamfer(pred_pc['whole'], gt_pc['whole'])
     return metric_dict
-
-if __name__ == '__main__':
-    pts1 = sample_points_from_ply('data/dta_multi/storage_47254/gt/end/end_rotate.ply')
-    pts2 = get_gaussian_surface_pcd('output/storage_st', 30000)
-
-    pts3 = fetchPly('data/dta_multi/storage_47254/start/points3d.ply').points
-    pts33 = GaussianModel(0).load_ply('output/storage_st/point_cloud/iteration_30000/point_cloud.ply').get_xyz
-
-    print(compute_chamfer(pts1, pts1))
-    print(compute_chamfer(pts1, pts2))
-    print(compute_chamfer(pts1, pts3))
-    print(compute_chamfer(pts1, pts33))

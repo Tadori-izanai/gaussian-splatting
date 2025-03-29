@@ -14,8 +14,11 @@ from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses, eval_img_loss, eval_opacity_bce_loss, eval_depth_loss
 from scene import BWScenes
 from scene.gaussian_model import GaussianModel
+from scene.dataset_readers import readCamerasFromTransforms
+from scene.multipart_models import GMMArtModel
 from utils.general_utils import get_per_point_cd, otsu_with_peak_filtering, inverse_sigmoid, \
-    decompose_covariance_matrix, rotation_matrix_from_axis_angle
+    decompose_covariance_matrix, rotation_matrix_from_axis_angle, eval_quad
+from utils.graphics_utils import getProjectionMatrix, getWorld2View
 
 def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, depth_weight=None):
     _ = prepare_output_and_logger(dataset)
@@ -172,3 +175,110 @@ def modify_scaling(cov: torch.tensor, scaling_modifier=1.0) -> torch.tensor:
     scaling, rotation = decompose_covariance_matrix(cov)
     scaling = torch.diag_embed(scaling * scaling_modifier)
     return rotation @ scaling @ scaling @ rotation.transpose(1, 2)
+
+def get_depths(
+    pts: np.ndarray,  # given pts in world coordinate
+    depth_map: np.ndarray,
+    R: np.array,
+    T: np.array,
+    FovY: np.array,
+    FovX: np.array,
+    image_width: int,
+    image_height: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    zfar = 100.0
+    znear = 0.01
+    projection_matrix = getProjectionMatrix(znear, zfar, FovX, FovY, blender_convention=True).cpu().numpy()
+    w2c_colmap = getWorld2View(R, T)
+    c2w_colmap = np.linalg.inv(w2c_colmap)
+    c2w_blender = c2w_colmap.copy()
+    c2w_blender[:3, 1:3] *= -1
+    w2c_blender = np.linalg.inv(c2w_blender)
+
+    # Transform world coordinates to camera space
+    pts_homo = np.hstack([pts, np.ones((pts.shape[0], 1))])  # (N, 4)
+    pts_camera = (w2c_blender @ pts_homo.T).T  # (N, 4)
+    # Transform camera space to clip space
+    pts_clip = (projection_matrix @ pts_camera.T).T  # (N, 4)
+    pts_clip /= pts_clip[:, 3, np.newaxis]      # Perspective division
+    pts_camera /= pts_camera[:, 3, np.newaxis]  # Perspective division
+    # Convert to pixel coordinates
+    x_pixel = ((pts_clip[:, 0] + 1) * image_width / 2).astype(int)
+    y_pixel = ((1 - pts_clip[:, 1]) * image_height / 2).astype(int)
+    # Clamp pixel coordinates to valid range
+    x_pixel = np.clip(x_pixel, 0, image_width - 1)
+    y_pixel = np.clip(y_pixel, 0, image_height - 1)
+    # Get depths from the depth map
+    pixel_depths = depth_map[y_pixel, x_pixel]
+
+    pixel_depths[pixel_depths < 0.01] = 114.514
+    return -pts_camera[:, 2], pixel_depths
+
+def eval_visibility(pts: np.array, data_path: str, eps: float=0.01) -> np.array:
+    data_path = os.path.realpath(data_path)
+    train_cam_infos = readCamerasFromTransforms(data_path, "transforms_train.json", white_background=False)
+    vis = np.zeros(len(pts), dtype='bool')
+    for cam_info in train_cam_infos:
+        depth_pts, depth_obj = get_depths(
+            pts=pts,
+            depth_map=cam_info.image_d,
+            R=cam_info.R,
+            T=cam_info.T,
+            FovX=cam_info.FovX,
+            FovY=cam_info.FovY,
+            image_width=cam_info.width,
+            image_height=cam_info.height,
+        )
+        vis |= (depth_pts < depth_obj + eps)
+    return vis
+
+def get_vis_mask(gaussians: GaussianModel, data_path: str, eps: float=0.01) -> torch.tensor:
+    xyz = gaussians.get_xyz.detach().cpu().numpy()
+    return torch.tensor(eval_visibility(xyz, data_path, eps), device=gaussians.get_xyz.device)
+
+if __name__ == '__main__':
+    def init_demo_v2(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int):
+        mk_output_dir(out_path, os.path.join(data_path, 'start'))
+        gaussians_st = get_gaussians(st_path, from_chk=True)
+        gaussians_ed = get_gaussians(ed_path, from_chk=True)
+
+        st_data = os.path.join(data_path, 'start')
+        ed_data = os.path.join(data_path, 'end')
+        st_mask = get_vis_mask(gaussians_st, ed_data)
+        ed_mask = get_vis_mask(gaussians_ed, st_data)
+        gaussians_st = gaussians_st[st_mask]
+        gaussians_ed = gaussians_ed[ed_mask]
+
+        cd, cd_is, mpp = init_mpp(gaussians_st, gaussians_ed, thr=-4)
+        mask_s = (mpp < .5)
+        mu, sigma = eval_init_gmm_params(train_pts=gaussians_st[~mask_s].get_xyz, num=num_movable)
+
+        gaussians_st[~mask_s].save_ply(os.path.join(out_path, 'point_cloud/iteration_10/point_cloud.ply'))
+        np.save(os.path.join(out_path, 'mu_init.npy'), mu.detach().cpu().numpy())
+        np.save(os.path.join(out_path, 'sigma_init.npy'), sigma.detach().cpu().numpy())
+
+        ## gmm_am_optim_demo_v2
+        torch.autograd.set_detect_anomaly(False)
+        gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
+        am = GMMArtModel(gaussians_st, num_movable)
+        am.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path)
+        am.set_init_params(out_path, scaling_modifier=1)
+        am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_9/point_cloud.ply'))
+
+    K = 6
+    st = 'output/sto6_st'
+    ed = 'output/sto6_ed'
+    data = 'data/artgs/storage_47648'
+    out = 'output/sto6'
+    rev = True
+
+    # K = 4
+    # st = 'output/tbr4_st'
+    # ed = 'output/tbr4_ed'
+    # data = 'data/teeburu34178'
+    # out = 'output/tbr4'
+    # rev = False
+
+    init_demo_v2(out, st, ed, data, num_movable=K)
+
+    pass
