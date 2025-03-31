@@ -236,6 +236,22 @@ def get_vis_mask(gaussians: GaussianModel, data_path: str, eps: float=0.01) -> t
     xyz = gaussians.get_xyz.detach().cpu().numpy()
     return torch.tensor(eval_visibility(xyz, data_path, eps), device=gaussians.get_xyz.device)
 
+def value_to_rgb(values, cmap_name='viridis'):
+    """
+    将 0~1 之间的值映射到 RGB 颜色。
+
+    参数:
+    values: (N,) 形状的 Tensor，值范围在 [0,1]。
+    cmap_name: 字符串，可选，Matplotlib 的 colormap 名称。
+
+    返回:
+    (N, 3) 形状的 Tensor，RGB 颜色值范围在 [0,1]。
+    """
+    cmap = plt.get_cmap(cmap_name)
+    values = values.detach().cpu().numpy()  # 转换为 NumPy 以使用 Matplotlib
+    colors = cmap(values)[:, :3]   # 获取 RGB 值（忽略 alpha 通道）
+    return torch.tensor(colors, dtype=torch.float32)
+
 if __name__ == '__main__':
     def init_demo_v2(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int):
         mk_output_dir(out_path, os.path.join(data_path, 'start'))

@@ -289,25 +289,26 @@ class GMMArtModel(MPArtModelBasic):
             c = torch.tensor(colors[k % len(colors)])
             fused_color += ppp[:, k].unsqueeze(1).cpu() * c
 
-        features = torch.zeros((fused_color.shape[0], 3, (self.original_gaussians.max_sh_degree + 1) ** 2)).float().cuda()
-        features[:, :3, 0] = fused_color
-        features[:, 3:, 1:] = 0.0
-        features_dc = features[:,:,0:1].transpose(1, 2).contiguous()
-        features_rest = features[:,:,1:].transpose(1, 2).contiguous()
-
-        xyz = self.original_gaussians.get_xyz.detach().cpu().numpy()
-        normals = np.zeros_like(xyz)
-        f_dc = features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_rest = features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        opacities = self.original_gaussians.get_opacity_raw.detach().cpu().numpy()
-        scale = self.original_gaussians.get_scaling_raw.detach().cpu().numpy()
-        rotation = self.original_gaussians.get_rotation_raw.detach().cpu().numpy()
-
-        dtype_full = [(attribute, 'f4') for attribute in self.original_gaussians.construct_list_of_attributes()]
-        elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
-        elements[:] = list(map(tuple, attributes))
-        PlyData([PlyElement.describe(elements, 'vertex')]).write(path)
+        # features = torch.zeros((fused_color.shape[0], 3, (self.original_gaussians.max_sh_degree + 1) ** 2)).float().cuda()
+        # features[:, :3, 0] = fused_color
+        # features[:, 3:, 1:] = 0.0
+        # features_dc = features[:,:,0:1].transpose(1, 2).contiguous()
+        # features_rest = features[:,:,1:].transpose(1, 2).contiguous()
+        #
+        # xyz = self.original_gaussians.get_xyz.detach().cpu().numpy()
+        # normals = np.zeros_like(xyz)
+        # f_dc = features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        # f_rest = features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        # opacities = self.original_gaussians.get_opacity_raw.detach().cpu().numpy()
+        # scale = self.original_gaussians.get_scaling_raw.detach().cpu().numpy()
+        # rotation = self.original_gaussians.get_rotation_raw.detach().cpu().numpy()
+        #
+        # dtype_full = [(attribute, 'f4') for attribute in self.original_gaussians.construct_list_of_attributes()]
+        # elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        # attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        # elements[:] = list(map(tuple, attributes))
+        # PlyData([PlyElement.describe(elements, 'vertex')]).write(path)
+        self.original_gaussians.save_vis(path, fused_color)
 
     @override
     def training_setup(self, training_args):

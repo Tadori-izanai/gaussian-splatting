@@ -32,10 +32,11 @@ from scene.articulation_model import ArticulationModelBasic, ArticulationModelJo
 from scene.art_models import ArticulationModel
 from scene.multipart_models import MPArtModel, MPArtModelJoint, GMMArtModel
 from scene.multipart_misc import  OptimOMP, MPArtModelII
+from scene.deformable_model import DeformationModel
 
 from main_utils import train_single, get_gaussians, print_motion_params, plot_hist, \
     mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, eval_init_gmm_params, \
-    modify_scaling, get_vis_mask
+    modify_scaling, get_vis_mask, value_to_rgb
 from metric_utils import get_gt_motion_params, interpret_transforms, eval_axis_metrics, \
     get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics
 
@@ -53,6 +54,24 @@ def train_single_demo(path, data_path):
     dataset.source_path = os.path.realpath(data_path)
     dataset.model_path = path
     train_single(dataset, opt, pipes, gaussians, depth_weight=1.0, bce_weight=0.01)
+
+def train_deformation_demo(out_path: str, st_path: str, data_path: str):
+    mk_output_dir(out_path, os.path.join(data_path, 'end'))
+    gaussians_st = get_gaussians(st_path, from_chk=True)
+    dm = DeformationModel(gaussians_st)
+    dm.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path)
+    dm.train()
+
+    iteration = 15000
+    gaussians_st = get_gaussians(st_path, from_chk=True)
+    dnet = torch.load(os.path.join(out_path, f'dnet/iteration_{iteration}.pth'))
+    t, q = dnet(gaussians_st.get_xyz)
+    dist = t.norm(dim=1)
+    ang = 2 * torch.acos(torch.clamp(torch.abs((q / q.norm(dim=1, keepdim=True))[:, 0]), max=1.0))
+    t_color = value_to_rgb(dist / dist.max())
+    q_color = value_to_rgb(ang / ang.max())
+    gaussians_st.save_vis(os.path.join(out_path, 'point_cloud/iteration_1/point_cloud.ply'), t_color)
+    gaussians_st.save_vis(os.path.join(out_path, 'point_cloud/iteration_2/point_cloud.ply'), q_color)
 
 def init_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int):
     mk_output_dir(out_path, os.path.join(data_path, 'start'))
@@ -195,17 +214,17 @@ if __name__ == '__main__':
 
     ### ArtGS
     K = 3
-    # st = 'output/oven_st'
-    # ed = 'output/oven_ed'
-    # data = 'data/artgs/oven_101908'
-    # out = 'output/oven'
-    # rev = False
+    st = 'output/oven_st'
+    ed = 'output/oven_ed'
+    data = 'data/artgs/oven_101908'
+    out = 'output/oven'
+    rev = False
 
-    st = 'output/tbl3_st'
-    ed = 'output/tbl3_ed'
-    data = 'data/artgs/table_25493'
-    out = 'output/tbl3'
-    rev = True
+    # st = 'output/tbl3_st'
+    # ed = 'output/tbl3_ed'
+    # data = 'data/artgs/table_25493'
+    # out = 'output/tbl3'
+    # rev = True
 
     # K = 6
     # st = 'output/sto6_st'
@@ -214,7 +233,7 @@ if __name__ == '__main__':
     # out = 'output/sto6'
     # rev = True
 
-    ## outs
+    # ours
     # K = 4
     # st = 'output/tbr4_st'
     # ed = 'output/tbr4_ed'
@@ -226,6 +245,9 @@ if __name__ == '__main__':
 
     # train_single_demo(st, os.path.join(data, 'start'))
     # train_single_demo(ed, os.path.join(data, 'end'))
+
+    train_deformation_demo(out, st, data)
+
     # init_demo(out, st, ed, data, num_movable=K)
     # gmm_am_optim_demo(out, st, ed, data, num_movable=K)
     # mp_joint_optimization_demo(out, st, data, num_movable=K)
