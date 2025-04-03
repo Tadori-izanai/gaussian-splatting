@@ -5,6 +5,7 @@ from scene import Scene, GaussianModel
 from tqdm import tqdm
 from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
+from sklearn.neighbors import NearestNeighbors
 
 import json
 import numpy as np
@@ -17,7 +18,7 @@ from scene.gaussian_model import GaussianModel
 from scene.dataset_readers import readCamerasFromTransforms
 from scene.multipart_models import GMMArtModel
 from utils.general_utils import get_per_point_cd, otsu_with_peak_filtering, inverse_sigmoid, \
-    decompose_covariance_matrix, rotation_matrix_from_axis_angle, eval_quad
+    decompose_covariance_matrix, rotation_matrix_from_axis_angle, eval_quad, knn
 from utils.graphics_utils import getProjectionMatrix, getWorld2View
 
 def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, depth_weight=None):
@@ -251,6 +252,38 @@ def value_to_rgb(values, cmap_name='viridis'):
     values = values.detach().cpu().numpy()  # 转换为 NumPy 以使用 Matplotlib
     colors = cmap(values)[:, :3]   # 获取 RGB 值（忽略 alpha 通道）
     return torch.tensor(colors, dtype=torch.float32)
+
+def estimate_se3(p: torch.tensor, p_prime: torch.tensor, k_neighbors=21):
+    p = p.detach().cpu().numpy()
+    p_prime = p_prime.detach().cpu().numpy()
+    nbrs = NearestNeighbors(n_neighbors=k_neighbors).fit(p)
+    _, indices = nbrs.kneighbors(p)  # indices: (n_samples, k_neighbors)
+
+    def estimate_se3_batch(p_subset, p_prime_subset):
+        # p_subset 和 p_prime_subset: (n_samples, k_neighbors, 3)
+        # 计算质心
+        p_mean = np.mean(p_subset, axis=1, keepdims=True)  # (n_samples, 1, 3)
+        p_prime_mean = np.mean(p_prime_subset, axis=1, keepdims=True)
+        # 去中心化
+        p_centered = p_subset - p_mean  # (n_samples, k_neighbors, 3)
+        p_prime_centered = p_prime_subset - p_prime_mean
+        # 协方差矩阵 H
+        H = np.einsum('ijk,ijl->ikl', p_centered, p_prime_centered)  # (n_samples, 3, 3)
+        # SVD 分解
+        U, _, Vt = np.linalg.svd(H)  # U, Vt: (n_samples, 3, 3)
+        R = np.einsum('ijk,ikl->ijl', Vt, U)  # (n_samples, 3, 3)
+        # 修正旋转矩阵（确保 det(R) = 1）
+        det_R = np.linalg.det(R)
+        Vt[:, :, -1] *= np.sign(det_R)[:, None]  # 调整最后一行
+        R = np.einsum('ijk,ikl->ijl', Vt, U)
+        # 计算平移
+        t = p_prime_mean.squeeze(axis=1) - np.einsum('ijk,ik->ij', R, p_mean.squeeze(axis=1))
+        return R, t
+
+    # 获取邻域点集
+    p_neighbors = p[indices]  # (n_samples, k_neighbors, 3)
+    p_prime_neighbors = p_prime[indices]
+    return estimate_se3_batch(p_neighbors, p_prime_neighbors)  # R: (n_samples, 3, 3), t: (n_samples, 3)
 
 if __name__ == '__main__':
     def init_demo_v2(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int):

@@ -9,6 +9,29 @@ import torch.nn.functional as F
 def normalize_aabb(pts, aabb):
     return (pts - aabb[0]) * (2.0 / (aabb[1] - aabb[0])) - 1.0
 
+def compute_volume_tv(v: torch.tensor, p: int=2):
+    if p == 2:
+        h_tv = torch.mean((v[..., 1:, :, :] - v[..., :-1, :, :]) ** 2)
+        w_tv = torch.mean((v[..., :, 1:, :] - v[..., :, :-1, :]) ** 2)
+        l_tv = torch.mean((v[..., :, :, 1:] - v[..., :, :, :-1]) ** 2)
+    else:
+        h_tv = torch.mean(torch.abs(v[..., 1:, :, :] - v[..., :-1, :, :]))
+        w_tv = torch.mean(torch.abs(v[..., :, 1:, :] - v[..., :, :-1, :]))
+        l_tv = torch.mean(torch.abs(v[..., :, :, 1:] - v[..., :, :, :-1]))
+    return h_tv + w_tv + l_tv
+
+def compute_volume_sep(v: torch.tensor):
+    return torch.mean(torch.abs(v))
+
+def compute_volume_smooth(v: torch.tensor):
+    h_diff = v[..., 1:, :, :] - v[..., :-1, :, :]
+    w_diff = v[..., :, 1:, :] - v[..., :, :-1, :]
+    l_diff = v[..., :, :, 1:] - v[..., :, :, :-1]
+    h_smo = torch.mean(torch.abs(h_diff[..., 1:, :, :] - h_diff[..., :-1, :, :]))
+    w_smo = torch.mean(torch.abs(w_diff[..., :, 1:, :] - w_diff[..., :, :-1, :]))
+    l_smo = torch.mean(torch.abs(l_diff[..., :, :, 1:] - l_diff[..., :, :, :-1]))
+    return h_smo + w_smo + l_smo
+
 class FeatureVolume(nn.Module):
     def __init__(self, out_dim, res, bounds=1.6, num_dim=3):
         super().__init__()
@@ -36,6 +59,15 @@ class FeatureVolume(nn.Module):
         feat2 = F.grid_sample(self._grid2, pts[None, None, None, :, :], mode='bilinear',
                              align_corners=True)  # [1, C, 1, 1, N]
         return torch.cat((feat[0, :, 0, 0, :].permute(1, 0), feat2[0, :, 0, 0, :].permute(1, 0)), dim=1)
+
+    def eval_tv(self):
+        return compute_volume_tv(self._grid) + compute_volume_tv(self._grid2)
+
+    def eval_sep(self):
+        return compute_volume_sep(self._grid) + compute_volume_sep(self._grid2)
+
+    def eval_smo(self):
+        return compute_volume_smooth(self._grid) + compute_volume_smooth(self._grid2)
 
 class DeformNet(nn.Module):
     def __init__(
@@ -79,8 +111,8 @@ class DeformNet(nn.Module):
         hidden = self.mlp(self.fv(pos))
         dt = self.pos_head(hidden)
         dr = self.rot_head(hidden)
-        # dr = torch.tensor([1, 0, 0, 0], device=pos.device) + self.rot_head(hidden)
-        # dr = dr / dr.norm(dim=1, keepdim=True)
+        dr += torch.tensor([1, 0, 0, 0], device=pos.device)
+        dr = dr / dr.norm(dim=1, keepdim=True)
         return dt, dr
 
     def get_mlp_parameters(self):
@@ -96,6 +128,15 @@ class DeformNet(nn.Module):
             if "fv" in name:
                 parameter_list.append(param)
         return parameter_list
+
+    def eval_tv(self):
+        return self.fv.eval_tv()
+
+    def eval_sep(self):
+        return self.fv.eval_sep()
+
+    def eval_smo(self):
+        return self.fv.eval_smo()
 
 if __name__ == '__main__':
     dn = DeformNet()

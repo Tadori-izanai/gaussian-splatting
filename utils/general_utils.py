@@ -168,6 +168,9 @@ def weighted_l2_loss_v1(x, y, w):
 def weighted_l2_loss_v2(x, y, w):
     return torch.sqrt(((x - y) ** 2).sum(-1) * w + 1e-20).mean()
 
+def weighted_l1_loss_v2(x, y, w):
+    return torch.abs((x - y).sum(-1) * w + 1e-20).mean()
+
 def mat2quat(m):
     t = torch.trace(m)
     if t > 0:

@@ -24,24 +24,26 @@ except ImportError:
 import json
 import matplotlib.pyplot as plt
 import numpy as np
+from pytorch3d.loss import chamfer_distance
+from sklearn.cluster import DBSCAN
+from sklearn.neighbors import NearestNeighbors
+
 from train import prepare_output_and_logger
 from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses
-from utils.general_utils import eval_quad
+from utils.general_utils import eval_quad, inverse_sigmoid
 from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
 from scene.art_models import ArticulationModel
 from scene.multipart_models import MPArtModel, MPArtModelJoint, GMMArtModel
 from scene.multipart_misc import  OptimOMP, MPArtModelII
-from scene.deformable_model import DeformationModel
+from scene.deformable_model import DeformationModel, DMCanonical, DMGauFRe
+from scene.dataset_readers import fetchPly, storePly
 
 from main_utils import train_single, get_gaussians, print_motion_params, plot_hist, \
     mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, eval_init_gmm_params, \
-    modify_scaling, get_vis_mask, value_to_rgb
+    modify_scaling, get_vis_mask, value_to_rgb, estimate_se3
 from metric_utils import get_gt_motion_params, interpret_transforms, eval_axis_metrics, \
     get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics
-
-from misc import mp_training_demo_v2, mp_mp_optim_demo
-from render import render_depth_for_pcd
 
 def train_single_demo(path, data_path):
     dataset, pipes, opt = get_default_args()
@@ -56,6 +58,7 @@ def train_single_demo(path, data_path):
     train_single(dataset, opt, pipes, gaussians, depth_weight=1.0, bce_weight=0.01)
 
 def train_deformation_demo(out_path: str, st_path: str, data_path: str):
+    torch.autograd.set_detect_anomaly(False)
     mk_output_dir(out_path, os.path.join(data_path, 'end'))
     gaussians_st = get_gaussians(st_path, from_chk=True)
     dm = DeformationModel(gaussians_st)
@@ -72,6 +75,114 @@ def train_deformation_demo(out_path: str, st_path: str, data_path: str):
     q_color = value_to_rgb(ang / ang.max())
     gaussians_st.save_vis(os.path.join(out_path, 'point_cloud/iteration_1/point_cloud.ply'), t_color)
     gaussians_st.save_vis(os.path.join(out_path, 'point_cloud/iteration_2/point_cloud.ply'), q_color)
+
+def train_dmc_demo(out_path, data_path):
+    torch.autograd.set_detect_anomaly(False)
+    mk_output_dir(out_path, os.path.join(data_path, 'end'))
+    dm = DMCanonical(GaussianModel(0))
+    dm.set_dataset(source_path=os.path.realpath(data_path), model_path=out_path)
+    dm.train()
+
+    iteration = 30000
+    gaussians_st = get_gaussians(out_path, from_chk=False, iters=iteration - 1)
+    dnet = torch.load(os.path.join(out_path, f'dnet/iteration_{iteration}.pth'))
+    t, q = dnet(gaussians_st.get_xyz)
+    dist = t.norm(dim=1)
+    ang = 2 * torch.acos(torch.clamp(torch.abs((q / q.norm(dim=1, keepdim=True))[:, 0]), max=1.0))
+    t_color = value_to_rgb(dist / dist.max())
+    q_color = value_to_rgb(ang / ang.max())
+    gaussians_st.save_vis(os.path.join(out_path, 'point_cloud/iteration_101/point_cloud.ply'), t_color)
+    gaussians_st.save_vis(os.path.join(out_path, 'point_cloud/iteration_102/point_cloud.ply'), q_color)
+
+def train_dmgau_demo(out_path, data_path):
+    torch.autograd.set_detect_anomaly(False)
+    mk_output_dir(out_path, os.path.join(data_path, 'end'))
+    dm = DMGauFRe(GaussianModel(0))
+    dm.set_dataset(source_path=os.path.realpath(data_path), model_path=out_path)
+    dm.train()
+
+    iteration = 30000
+    gaussians_canonical = get_gaussians(out_path, from_chk=False, iters=iteration - 1)
+    dnet = torch.load(os.path.join(out_path, f'dnet/iteration_{iteration}.pth'))
+    mask = torch.load(os.path.join(out_path, f'dnet/mask_{iteration}.pt'))
+    t, q = dnet(gaussians_canonical.get_xyz[mask])
+    dist = t.norm(dim=1)
+    ang = 2 * torch.acos(torch.clamp(torch.abs((q / q.norm(dim=1, keepdim=True))[:, 0]), max=1.0))
+    t_color = value_to_rgb(dist / dist.max())
+    q_color = value_to_rgb(ang / ang.max())
+    gaussians_canonical[mask].save_vis(os.path.join(out_path, 'point_cloud/iteration_101/point_cloud.ply'), t_color)
+    gaussians_canonical[mask].save_vis(os.path.join(out_path, 'point_cloud/iteration_102/point_cloud.ply'), q_color)
+
+def init_from_deformation_demo(out_path: str, st_path: str, ed_path: str, num_movable: int):
+    iteration = 15000
+    gaussians_st = get_gaussians(st_path, from_chk=True)
+    gaussians_ed = get_gaussians(ed_path, from_chk=True)
+    dnet = torch.load(os.path.join(out_path, f'dnet/iteration_{iteration}.pth'))
+
+    cd, cd_is, mpp = init_mpp(gaussians_st, gaussians_ed, thr=-4)
+    mask_m = (mpp > .5)
+    xyz = gaussians_st[mask_m].get_xyz
+    delta_xyz, _ = dnet(xyz)
+    r, t = estimate_se3(xyz, xyz + delta_xyz, k_neighbors=1001)
+
+    # dist = torch.tensor(t).norm(dim=1)
+    dist = torch.tensor(np.linalg.trace(r))
+    t_color = value_to_rgb(dist / dist.max())
+    gaussians_st[mask_m].save_vis(os.path.join(out_path, 'point_cloud/iteration_3/point_cloud.ply'), t_color)
+    dist = torch.tensor(np.linalg.norm(t, axis=1))
+    t_color = value_to_rgb(dist / dist.max())
+    gaussians_st[mask_m].save_vis(os.path.join(out_path, 'point_cloud/iteration_4/point_cloud.ply'), t_color)
+
+def init_from_dmgau_demo(out_path: str, st_path: str, ed_path: str, num_movable: int):
+    iteration = 30000
+    gaussians = get_gaussians(out_path, from_chk=False, iters=iteration - 1)
+    dnet = torch.load(os.path.join(out_path, f'dnet/iteration_{iteration}.pth'))
+    mask = torch.load(os.path.join(out_path, f'dnet/mask_{iteration}.pt'))
+
+    xyz = gaussians.get_xyz[mask]
+    delta_xyz, _ = dnet(xyz)
+    r, t = estimate_se3(xyz, xyz + delta_xyz, k_neighbors=1001)
+
+    dist = torch.tensor(np.linalg.trace(r))
+    t_color = value_to_rgb(dist / dist.max())
+    gaussians[mask].save_vis(os.path.join(out_path, 'point_cloud/iteration_3/point_cloud.ply'), t_color)
+    dist = torch.tensor(np.linalg.norm(t, axis=1))
+    t_color = value_to_rgb(dist / dist.max())
+    gaussians[mask].save_vis(os.path.join(out_path, 'point_cloud/iteration_4/point_cloud.ply'), t_color)
+
+def cluster_demo(out_path: str, data_path: str, num_movable: int, thr: int=-4):
+    ply_path = os.path.join(out_path, 'clustering')
+    os.makedirs(ply_path, exist_ok=True)
+    st_data = os.path.join(os.path.realpath(data_path), 'start')
+    ed_data = os.path.join(os.path.realpath(data_path), 'end')
+    xyz_st = np.asarray(fetchPly(os.path.join(st_data, 'points3d.ply')).points)
+    xyz_ed = np.asarray(fetchPly(os.path.join(ed_data, 'points3d.ply')).points)
+
+    x = torch.tensor(xyz_st).unsqueeze(0)
+    y = torch.tensor(xyz_ed).unsqueeze(0)
+    cd = chamfer_distance(x, y, batch_reduction=None, point_reduction=None, single_directional=True)[0][0]
+    cd /= torch.max(cd)
+    mask = (inverse_sigmoid(torch.clamp(cd, 1e-6, 1 - 1e-6)) > thr)
+    x = x[0][mask].detach().cpu().numpy()
+
+    # neigh = NearestNeighbors(n_neighbors=5)
+    # neigh.fit(x)
+    # distances, _ = neigh.kneighbors(x)
+    # distances = np.sort(distances[:, -1])  # 取每个点的第 k 近邻距离
+    # plt.figure()
+    # plt.hist(distances, bins=100)
+    # plt.savefig(os.path.join(ply_path, 'distdist.png'))
+    # plt.figure()
+    # plt.plot(distances)
+    # plt.savefig(os.path.join(ply_path, 'dist.png'))
+    # return
+
+    clustering = DBSCAN(eps=0.01, min_samples=num_movable).fit(x)
+    labels = clustering.labels_
+    for k in np.unique(labels):
+        pts = x[labels == k]
+        storePly(os.path.join(ply_path, f'points3d_{k}.ply'), pts, np.zeros_like(pts))
+    storePly(os.path.join(ply_path, f'points3d.ply'), x, np.zeros_like(x))
 
 def init_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int):
     mk_output_dir(out_path, os.path.join(data_path, 'start'))
@@ -220,11 +331,11 @@ if __name__ == '__main__':
     out = 'output/oven'
     rev = False
 
-    # st = 'output/tbl3_st'
-    # ed = 'output/tbl3_ed'
-    # data = 'data/artgs/table_25493'
-    # out = 'output/tbl3'
-    # rev = True
+    st = 'output/tbl3_st'
+    ed = 'output/tbl3_ed'
+    data = 'data/artgs/table_25493'
+    out = 'output/tbl3'
+    rev = True
 
     # K = 6
     # st = 'output/sto6_st'
@@ -233,7 +344,6 @@ if __name__ == '__main__':
     # out = 'output/sto6'
     # rev = True
 
-    # ours
     # K = 4
     # st = 'output/tbr4_st'
     # ed = 'output/tbr4_ed'
@@ -241,12 +351,27 @@ if __name__ == '__main__':
     # out = 'output/tbr4'
     # rev = False
 
-    get_gt_motion_params(data, reverse=rev)
+    # K = 5
+    # st = 'output/tbr5_st'
+    # ed = 'output/tbr5_ed'
+    # data = 'data/teeburu34610'
+    # out = 'output/tbr5'
+    # rev = False
+
+    # get_gt_motion_params(data, reverse=rev)
 
     # train_single_demo(st, os.path.join(data, 'start'))
     # train_single_demo(ed, os.path.join(data, 'end'))
 
-    train_deformation_demo(out, st, data)
+    # train_dmc_demo('output/v2', data)
+    # init_from_deformation_demo('output/v2', st, ed, K)
+    # train_dmgau_demo('output/v3', data)
+    # init_from_dmgau_demo('output/v31', st, ed, K)
+
+    # train_deformation_demo(out, st, data)
+    # init_from_deformation_demo(out, st, ed, K)
+
+    cluster_demo(out, data, K)
 
     # init_demo(out, st, ed, data, num_movable=K)
     # gmm_am_optim_demo(out, st, ed, data, num_movable=K)

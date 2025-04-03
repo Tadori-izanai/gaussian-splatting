@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
 
-from utils.general_utils import build_rotation, quat_mult, weighted_l2_loss_v2, weighted_l2_loss_v1
+from utils.general_utils import build_rotation, quat_mult, weighted_l2_loss_v2, weighted_l2_loss_v1, weighted_l1_loss_v2
 from scene.gaussian_model import GaussianModel
 from pytorch3d.loss import chamfer_distance
 from pytorch3d.ops import knn_points
@@ -100,7 +100,7 @@ def eval_cd_loss_sd(gaussians: GaussianModel, gt_gaussians: GaussianModel, n_sam
     dist, _ = chamfer_distance(pts, gt_pts, batch_reduction=None)
     return dist[0]
 
-def eval_rigid_loss(gaussians: GaussianModel) -> torch.Tensor:
+def eval_rigid_loss(gaussians: GaussianModel, ord: int=2) -> torch.Tensor:
     curr_rot = gaussians.get_rotation
     relative_rot = quat_mult(curr_rot, gaussians.prev_rotation_inv)
     rotation = build_rotation(relative_rot)
@@ -108,6 +108,8 @@ def eval_rigid_loss(gaussians: GaussianModel) -> torch.Tensor:
     prev_offset = gaussians.prev_xyz[gaussians.neighbor_indices] - gaussians.prev_xyz[:, None]
     curr_offset = gaussians.get_xyz[gaussians.neighbor_indices] - gaussians.get_xyz[:, None]
     curr_offset_in_prev_coord = (rotation.transpose(2, 1)[:, None] @ curr_offset[:, :, :, None]).squeeze(-1)
+    if ord == 1:
+        return weighted_l1_loss_v2(curr_offset_in_prev_coord, prev_offset, gaussians.neighbor_weight)
     return weighted_l2_loss_v2(curr_offset_in_prev_coord, prev_offset, gaussians.neighbor_weight)
 
 def eval_rot_loss(gaussians: GaussianModel) -> torch.Tensor:

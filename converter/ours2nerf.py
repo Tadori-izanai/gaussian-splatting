@@ -37,7 +37,8 @@ def convert_to_nerf(path: str) -> None:
         shutil.rmtree(dynamic_dir)
 
 if __name__ == '__main__':
-    data = '../data/teeburu34178'
+    # data = '../data/teeburu34178'
+    data = '../data/teeburu34610'
     convert_to_nerf(data)
 
     pass
