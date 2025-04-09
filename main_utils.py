@@ -175,6 +175,11 @@ def eval_init_gmm_params(train_pts: torch.tensor, num: int) -> tuple[torch.tenso
     covariances = torch.tensor(gmm.covariances_, device=train_pts.device)
     return means, covariances
 
+def eval_mu_sigma(pts: np.ndarray) -> tuple[np.array, np.array]:
+    gmm = GaussianMixture(n_components=1, random_state=42)
+    gmm.fit(pts)
+    return gmm.means_, gmm.covariances_
+
 def modify_scaling(cov: torch.tensor, scaling_modifier=1.0) -> torch.tensor:
     scaling, rotation = decompose_covariance_matrix(cov)
     scaling = torch.diag_embed(scaling * scaling_modifier)

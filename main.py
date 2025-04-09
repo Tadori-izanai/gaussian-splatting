@@ -25,7 +25,7 @@ from scene.dataset_readers import fetchPly, storePly
 
 from main_utils import train_single, get_gaussians, print_motion_params, plot_hist, \
     mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, eval_init_gmm_params, \
-    modify_scaling, get_vis_mask, value_to_rgb, estimate_se3
+    modify_scaling, get_vis_mask, value_to_rgb, estimate_se3, eval_mu_sigma
 from metric_utils import get_gt_motion_params, interpret_transforms, eval_axis_metrics, \
     get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics
 
@@ -81,6 +81,26 @@ def cluster_demo(out_path: str, data_path: str, num_movable: int, thr: int=-5):
         storePly(os.path.join(ply_path, f'clusters/points3d_{k}.ply'), pts, np.zeros_like(pts))
     storePly(os.path.join(ply_path, f'points3d.ply'), x, np.zeros_like(x))
 
+def init_demo_from_dbscan(out_path, num_movable: int):
+    pts = []
+    cluster_dir = os.path.join(out_path, 'clustering/clusters')
+
+    for i in np.arange(20):
+        ply_file = os.path.join(cluster_dir, f'points3d_{i}.ply')
+        if not os.path.exists(ply_file):
+            continue
+        pts.append(np.asarray(fetchPly(ply_file).points))
+        if len(pts) == num_movable:
+            break
+    assert len(pts) == num_movable
+
+    mu = np.zeros((num_movable, 3))
+    sigma = np.zeros((num_movable, 3, 3))
+    for i in np.arange(num_movable):
+        mu[i], sigma[i] = eval_mu_sigma(pts[i])
+    np.save(os.path.join(out_path, 'mu_init.npy'), mu)
+    np.save(os.path.join(out_path, 'sigma_init.npy'), sigma)
+
 def init_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int):
     mk_output_dir(out_path, os.path.join(data_path, 'start'))
     gaussians_st = get_gaussians(st_path, from_chk=True)
@@ -124,6 +144,7 @@ def gmm_am_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str,
     # am.set_init_params(out_path, scaling_modifier=10)
     am.set_init_params(out_path, scaling_modifier=1)
     am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_9/point_cloud.ply'))
+    # return
     t, r = am.train(gt_gaussians=gaussians_ed)
 
     ppp = am.get_ppp().detach().cpu().numpy()
@@ -248,29 +269,30 @@ if __name__ == '__main__':
     # out = 'output/tbr4'
     # rev = False
 
-    K = 5
+    # K = 5
     # st = 'output/tbr5_st'
     # ed = 'output/tbr5_ed'
     # data = 'data/teeburu34610'
     # out = 'output/tbr5'
     # rev = False
 
-    st = 'output/ob5_st'
-    ed = 'output/ob5_ed'
-    data = 'data/oobun7201'
-    out = 'output/ob5'
-    rev = False
+    # st = 'output/ob5_st'
+    # ed = 'output/ob5_ed'
+    # data = 'data/oobun7201'
+    # out = 'output/ob5'
+    # rev = False
 
     get_gt_motion_params(data, reverse=rev)
 
     # train_single_demo(st, os.path.join(data, 'start'))
     # train_single_demo(ed, os.path.join(data, 'end'))
 
-    cluster_demo(out, data, K)
+    # cluster_demo(out, data, K)
+    # init_demo_from_dbscan(out, K)
 
     # init_demo(out, st, ed, data, num_movable=K)
     # gmm_am_optim_demo(out, st, ed, data, num_movable=K)
     # mp_joint_optimization_demo(out, st, data, num_movable=K)
-    # eval_demo(out, data, num_movable=K, reverse=rev)
+    eval_demo(out, data, num_movable=K, reverse=rev)
 
     pass
