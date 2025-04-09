@@ -108,9 +108,12 @@ def print_motion_params(out_path: str):
     print('t:', t)
     print('r:', r)
 
-def plot_hist(x: torch.Tensor, path: str, bins=100):
+def plot_hist(x, path: str, bins=100):
     plt.figure()
-    plt.hist(x.detach().cpu().numpy(), bins=bins)
+    try:
+        plt.hist(x, bins=bins)
+    except:
+        plt.hist(x.detach().cpu().numpy(), bins=bins)
     plt.savefig(path)
 
 def mk_output_dir(out_path: str, data_path: str):

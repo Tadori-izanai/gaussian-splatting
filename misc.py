@@ -29,6 +29,7 @@ from scene.articulation_model import ArticulationModelBasic, ArticulationModelJo
 from scene.art_models import ArticulationModel
 from scene.multipart_misc import OptimOMP, MPArtModelII
 from scene.multipart_models import MPArtModel
+from scene.deformable_model import DMCanonical, DMGauFRe, DeformationModel
 from metric_utils import get_gt_motion_params
 
 from main_utils import *
@@ -464,3 +465,98 @@ def joint_optim_demo(out_path: str, st_path: str, data_path: str):
     np.save(os.path.join(out_path, 'mask_final.npy'), amj.mask.cpu().numpy())
     np.save(os.path.join(out_path, 't_final.npy'), t.detach().cpu().numpy())
     np.save(os.path.join(out_path, 'r_final.npy'), r.detach().cpu().numpy())
+
+### deformation network training and testing
+def train_deformation_demo(out_path: str, st_path: str, data_path: str):
+    torch.autograd.set_detect_anomaly(False)
+    mk_output_dir(out_path, os.path.join(data_path, 'end'))
+    gaussians_st = get_gaussians(st_path, from_chk=True)
+    dm = DeformationModel(gaussians_st)
+    dm.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path)
+    dm.train()
+
+    iteration = 15000
+    gaussians_st = get_gaussians(st_path, from_chk=True)
+    dnet = torch.load(os.path.join(out_path, f'dnet/iteration_{iteration}.pth'))
+    t, q = dnet(gaussians_st.get_xyz)
+    dist = t.norm(dim=1)
+    ang = 2 * torch.acos(torch.clamp(torch.abs((q / q.norm(dim=1, keepdim=True))[:, 0]), max=1.0))
+    t_color = value_to_rgb(dist / dist.max())
+    q_color = value_to_rgb(ang / ang.max())
+    gaussians_st.save_vis(os.path.join(out_path, 'point_cloud/iteration_1/point_cloud.ply'), t_color)
+    gaussians_st.save_vis(os.path.join(out_path, 'point_cloud/iteration_2/point_cloud.ply'), q_color)
+
+def train_dmc_demo(out_path, data_path):
+    torch.autograd.set_detect_anomaly(False)
+    mk_output_dir(out_path, os.path.join(data_path, 'end'))
+    dm = DMCanonical(GaussianModel(0))
+    dm.set_dataset(source_path=os.path.realpath(data_path), model_path=out_path)
+    dm.train()
+
+    iteration = 30000
+    gaussians_st = get_gaussians(out_path, from_chk=False, iters=iteration - 1)
+    dnet = torch.load(os.path.join(out_path, f'dnet/iteration_{iteration}.pth'))
+    t, q = dnet(gaussians_st.get_xyz)
+    dist = t.norm(dim=1)
+    ang = 2 * torch.acos(torch.clamp(torch.abs((q / q.norm(dim=1, keepdim=True))[:, 0]), max=1.0))
+    t_color = value_to_rgb(dist / dist.max())
+    q_color = value_to_rgb(ang / ang.max())
+    gaussians_st.save_vis(os.path.join(out_path, 'point_cloud/iteration_101/point_cloud.ply'), t_color)
+    gaussians_st.save_vis(os.path.join(out_path, 'point_cloud/iteration_102/point_cloud.ply'), q_color)
+
+def train_dmgau_demo(out_path, data_path):
+    torch.autograd.set_detect_anomaly(False)
+    mk_output_dir(out_path, os.path.join(data_path, 'end'))
+    dm = DMGauFRe(GaussianModel(0))
+    dm.set_dataset(source_path=os.path.realpath(data_path), model_path=out_path)
+    dm.train()
+
+    iteration = 30000
+    gaussians_canonical = get_gaussians(out_path, from_chk=False, iters=iteration - 1)
+    dnet = torch.load(os.path.join(out_path, f'dnet/iteration_{iteration}.pth'))
+    mask = torch.load(os.path.join(out_path, f'dnet/mask_{iteration}.pt'))
+    t, q = dnet(gaussians_canonical.get_xyz[mask])
+    dist = t.norm(dim=1)
+    ang = 2 * torch.acos(torch.clamp(torch.abs((q / q.norm(dim=1, keepdim=True))[:, 0]), max=1.0))
+    t_color = value_to_rgb(dist / dist.max())
+    q_color = value_to_rgb(ang / ang.max())
+    gaussians_canonical[mask].save_vis(os.path.join(out_path, 'point_cloud/iteration_101/point_cloud.ply'), t_color)
+    gaussians_canonical[mask].save_vis(os.path.join(out_path, 'point_cloud/iteration_102/point_cloud.ply'), q_color)
+
+def init_from_deformation_demo(out_path: str, st_path: str, ed_path: str, num_movable: int):
+    iteration = 15000
+    gaussians_st = get_gaussians(st_path, from_chk=True)
+    gaussians_ed = get_gaussians(ed_path, from_chk=True)
+    dnet = torch.load(os.path.join(out_path, f'dnet/iteration_{iteration}.pth'))
+
+    cd, cd_is, mpp = init_mpp(gaussians_st, gaussians_ed, thr=-4)
+    mask_m = (mpp > .5)
+    xyz = gaussians_st[mask_m].get_xyz
+    delta_xyz, _ = dnet(xyz)
+    r, t = estimate_se3(xyz, xyz + delta_xyz, k_neighbors=1001)
+
+    # dist = torch.tensor(t).norm(dim=1)
+    dist = torch.tensor(np.linalg.trace(r))
+    t_color = value_to_rgb(dist / dist.max())
+    gaussians_st[mask_m].save_vis(os.path.join(out_path, 'point_cloud/iteration_3/point_cloud.ply'), t_color)
+    dist = torch.tensor(np.linalg.norm(t, axis=1))
+    t_color = value_to_rgb(dist / dist.max())
+    gaussians_st[mask_m].save_vis(os.path.join(out_path, 'point_cloud/iteration_4/point_cloud.ply'), t_color)
+
+def init_from_dmgau_demo(out_path: str, st_path: str, ed_path: str, num_movable: int):
+    iteration = 30000
+    gaussians = get_gaussians(out_path, from_chk=False, iters=iteration - 1)
+    dnet = torch.load(os.path.join(out_path, f'dnet/iteration_{iteration}.pth'))
+    mask = torch.load(os.path.join(out_path, f'dnet/mask_{iteration}.pt'))
+
+    xyz = gaussians.get_xyz[mask]
+    delta_xyz, _ = dnet(xyz)
+    r, t = estimate_se3(xyz, xyz + delta_xyz, k_neighbors=1001)
+
+    dist = torch.tensor(np.linalg.trace(r))
+    t_color = value_to_rgb(dist / dist.max())
+    gaussians[mask].save_vis(os.path.join(out_path, 'point_cloud/iteration_3/point_cloud.ply'), t_color)
+    dist = torch.tensor(np.linalg.norm(t, axis=1))
+    t_color = value_to_rgb(dist / dist.max())
+    gaussians[mask].save_vis(os.path.join(out_path, 'point_cloud/iteration_4/point_cloud.ply'), t_color)
+### end

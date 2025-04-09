@@ -2,9 +2,11 @@ import os
 import shutil
 from pathlib import Path
 
-from converter.artgs2nerf import move_dir
+from converter.artgs2nerf import move_dir, safe_move
 
 def find_files_with_suffix(directory, suffix):
+    if not os.path.exists(directory):
+        return []
     matching_files = []
     for filename in os.listdir(directory):
         if filename.endswith(suffix):
@@ -26,19 +28,24 @@ def convert_to_nerf(path: str) -> None:
             f'{state}.obj', f'{state}.obj.mtl',
             f'{state}_rotate.ply', f'{state}_static_rotate.ply', f'{state}_dynamic_rotate.ply'
         ]:
-            shutil.move(os.path.join(curr, filename), os.path.join(gt_state, filename))
+            safe_move(os.path.join(curr, filename), os.path.join(gt_state, filename))
 
         dynamic_dir = os.path.join(curr, f'{state}_dynamic_rotates')
-        for filename in find_files_with_suffix(dynamic_dir, '.ply'):
-            shutil.move(
-                os.path.join(dynamic_dir, filename),
-                os.path.join(gt_state, f'{state}_dynamic_{Path(filename).stem}_rotate.ply')
+        for filename in find_files_with_suffix(curr, '.ply'):
+            safe_move(
+                os.path.join(curr, filename),
+                os.path.join(gt_state, filename.replace('_rotates.ply', '_rotate.ply'))
             )
-        shutil.rmtree(dynamic_dir)
+            print('moved', filename)
+        # shutil.rmtree(dynamic_dir)
 
 if __name__ == '__main__':
     # data = '../data/teeburu34178'
-    data = '../data/teeburu34610'
+    # data = '../data/teeburu34610'
+    # data = '../data/naifu101253'
+    # data = '../data/oobun7201'
+    data = '../data/sutoreeji40417'
+
     convert_to_nerf(data)
 
     pass

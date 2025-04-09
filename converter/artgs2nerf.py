@@ -14,12 +14,19 @@ def load_json_to_dict(file_path: str) -> dict:
 def gen_empty_dict(horizontal_fov: float) -> dict:
     return {'camera_angle_x': horizontal_fov, 'frames': []}
 
+def safe_move(source: str, target: str):
+    if os.path.exists(target) or not os.path.exists(source):
+        return
+    shutil.move(source, target)
+
 def move_dir(source_dir: str, target_dir: str, rm=False) -> None:
+    if os.path.exists(target_dir) or not os.path.exists(source_dir):
+        return
     os.makedirs(target_dir, exist_ok=True)
     for item in os.listdir(source_dir):
         source_path = os.path.join(source_dir, item)
         destination_path = os.path.join(target_dir, item)
-        shutil.move(source_path, destination_path)
+        safe_move(source_path, destination_path)
     if rm:
         os.rmdir(source_dir)
 
