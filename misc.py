@@ -28,7 +28,7 @@ from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid
 from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
 from scene.art_models import ArticulationModel
 from scene.multipart_misc import OptimOMP, MPArtModelII
-from scene.multipart_models import MPArtModel
+from scene.multipart_misc import MPArtModel
 from scene.deformable_model import DMCanonical, DMGauFRe, DeformationModel
 from metric_utils import get_gt_motion_params
 
@@ -560,3 +560,37 @@ def init_from_dmgau_demo(out_path: str, st_path: str, ed_path: str, num_movable:
     t_color = value_to_rgb(dist / dist.max())
     gaussians[mask].save_vis(os.path.join(out_path, 'point_cloud/iteration_4/point_cloud.ply'), t_color)
 ### end
+
+def init_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int):
+    mk_output_dir(out_path, os.path.join(data_path, 'start'))
+    gaussians_st = get_gaussians(st_path, from_chk=True)
+    gaussians_ed = get_gaussians(ed_path, from_chk=True)
+
+    # cd, cd_is, mpp = init_mpp(gaussians_st, gaussians_ed)
+    cd, cd_is, mpp = init_mpp(gaussians_st, gaussians_ed, thr=-4)
+    mask_s = (mpp < .5)
+    mu, sigma = eval_init_gmm_params(train_pts=gaussians_st[~mask_s].get_xyz, num=num_movable)
+
+    sigma_modified = modify_scaling(sigma, scaling_modifier=10)
+    quad = eval_quad(gaussians_st.get_xyz.unsqueeze(1) - mu, torch.linalg.inv(sigma_modified))
+    ppp = torch.exp(-quad)
+    ppp /= ppp.sum(dim=1, keepdim=True)
+    part_indices = torch.argmax(ppp, dim=1)
+
+    for i in range(num_movable):
+        gaussians_st[~mask_s & (part_indices == i)].save_ply(
+            os.path.join(out_path, f'point_cloud/iteration_{11 + i}/point_cloud.ply')
+        )
+    # gaussians_st[~mask_s].save_ply(os.path.join(out_path, 'point_cloud/iteration_10/point_cloud.ply'))
+    gaussians_m = gaussians_st[~mask_s]
+    gaussians_m[get_vis_mask(gaussians_m, os.path.join(data_path, 'end'))].save_ply(
+        os.path.join(out_path, 'point_cloud/iteration_10/point_cloud.ply'))
+
+    plot_hist(cd, os.path.join(out_path, 'cd.png'))
+    plot_hist(cd_is, os.path.join(out_path, 'cd_is.png'))
+    plot_hist(mpp, os.path.join(out_path, 'mpp.png'))
+    plot_hist(ppp[:, 0], os.path.join(out_path, 'ppp0.png'), bins=200)
+    np.save(os.path.join(out_path, 'mpp_init.npy'), mpp.detach().cpu().numpy())
+    np.save(os.path.join(out_path, 'mu_init.npy'), mu.detach().cpu().numpy())
+    np.save(os.path.join(out_path, 'sigma_init.npy'), sigma.detach().cpu().numpy())
+

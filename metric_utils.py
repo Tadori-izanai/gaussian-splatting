@@ -40,7 +40,7 @@ def interpret_transforms(translations: np.ndarray, rotations: np.ndarray) -> lis
     for t, r in zip(translations, rotations):
         trans_info = {}
         theta = np.acos((np.trace(r) - 1) / 2)
-        if theta < 8e-2:
+        if theta < 0.15:
             trans_info['type'] = 'translate'
             trans_info['axis'] = {
                 'o': [0., 0., 0.],
@@ -55,22 +55,40 @@ def interpret_transforms(translations: np.ndarray, rotations: np.ndarray) -> lis
         results.append(trans_info)
     return results
 
-def sort_trans_gt(trans_pred: list[dict], trans_gt: list[dict]) -> list[dict]:
+def sort_trans_gt(trans_pred: list[dict], trans_gt: list[dict], reverse: bool) -> list[dict]:
     def eval_diff(pred_info: dict, gt_info: dict):
         difference = None
         if pred_info['type'] == gt_info['type'] and gt_info['type'] == 'rotate':
-            o_diff = np.array(pred_info['axis']['o']) - np.array(gt_info['axis']['o'])
-            o_diff /= np.linalg.norm(o_diff)
+            # o_diff = np.array(pred_info['axis']['o']) - np.array(gt_info['axis']['o'])
+            # o_diff /= np.linalg.norm(o_diff)
+            # d_gt = np.array(gt_info['axis']['d'])
+            # d_gt /= np.linalg.norm(d_gt)
+            # angle_oo_axis = np.rad2deg(np.acos(np.abs(o_diff @ d_gt)))
+            # difference = angle_oo_axis + np.abs(abs(pred_info['rotate']) - abs(gt_info['rotate']))
             d_gt = np.array(gt_info['axis']['d'])
-            d_gt /= np.linalg.norm(d_gt)
-            angle_oo_axis = np.rad2deg(np.acos(np.abs(o_diff @ d_gt)))
-            difference = angle_oo_axis + np.abs(abs(pred_info['rotate']) - abs(gt_info['rotate']))
+            d_pred = np.array(pred_info['axis']['d'])
+            o_gt = np.array(gt_info['axis']['o'])
+            o_pred = np.array(pred_info['axis']['o'])
+            theta_gt = gt_info['rotate'] if not reverse else -gt_info['rotate']
+            theta_pred = pred_info['rotate']
+            r_diff = np.dot(
+                rotation_matrix_from_axis_angle(d_gt / np.linalg.norm(d_gt), theta_gt).T,
+                rotation_matrix_from_axis_angle(d_pred / np.linalg.norm(d_pred), theta_pred)
+            )
+            rot_diff = np.rad2deg(np.arccos(np.clip((np.trace(r_diff) - 1) / 2, -1, 1)))
+            pos_diff = line_distance(o_pred, d_pred, o_gt, d_gt)
+            difference = rot_diff + pos_diff
         if pred_info['type'] == gt_info['type'] and gt_info['type'] == 'translate':
             d_gt = np.array(gt_info['axis']['d'])
             d_pred = np.array(pred_info['axis']['d'])
-            angle = np.acos(d_gt @ d_pred)
-            arc_len = angle * gt_info['translate']
-            difference = arc_len + np.abs(abs(pred_info['translate']) - abs(gt_info['translate']))
+            if reverse:
+                d_gt *= -1
+            # angle = np.acos(d_gt @ d_pred)
+            # arc_len = angle * gt_info['translate']
+            # difference = arc_len + np.abs(abs(pred_info['translate']) - abs(gt_info['translate']))
+            l_gt = gt_info['translate']
+            l_pred = pred_info['translate']
+            difference = np.linalg.norm(d_gt * l_gt - d_pred * l_pred)
         assert difference is not None
         return difference
 
@@ -86,7 +104,8 @@ def sort_trans_gt(trans_pred: list[dict], trans_gt: list[dict]) -> list[dict]:
                 diff_min = diff
                 rm = gt
         trans_gt_sorted.append(rm)
-        trans_gt.remove(rm)
+        if rm is not None:
+            trans_gt.remove(rm)
     return trans_gt_sorted
 
 def line_distance(a_o, a_d, b_o, b_d):
@@ -122,18 +141,24 @@ def eval_axis_and_state(axis_a, axis_b):
 
     return angle, distance, state
 
-def eval_axis_metrics(trans_pred: list[dict], trans_gt: list[dict]) -> dict:
+def eval_axis_metrics(trans_pred: list[dict], trans_gt: list[dict], reverse: bool) -> dict:
     for info in trans_gt:
         info[info['type']] = info[info['type']]['r'] - info[info['type']]['l']
-    trans_gt = sort_trans_gt(trans_pred, trans_gt)
+    trans_gt = sort_trans_gt(trans_pred, trans_gt, reverse)
 
     metric_dict = {'axes': []}
     for pred, gt in zip(trans_pred, trans_gt):
+        if gt is None:
+            metric_dict['axes'].append({'axis_angle': -1, 'axis_dist': -1, 'theta_diff': -1})
+            continue
         angle, distance, state = eval_axis_and_state(pred, gt)
         metric_dict['axes'].append(
             {'axis_angle': angle, 'axis_dist': distance * 10, 'theta_diff': state}
         )
     return metric_dict
+
+############  axes 👆🏻     ############
+############  geometry 👇🏻 ############
 
 def get_gaussian_surface_pcd(model_path: str, it: int, n_samples: int=10_000) -> np.ndarray:
     def from_gaussian_xyz():
@@ -167,6 +192,7 @@ def get_pred_point_cloud(model_path: str, iters=30, K=1, n_samples: int=100_000)
         movables.append(get_gaussian_surface_pcd(model_path, iters + i, n_samples))
     movable = np.concatenate(movables, axis=0)
     whole = get_gaussian_surface_pcd(model_path, 99999, n_samples)
+    # whole = get_gaussian_surface_pcd(model_path, 9, n_samples)
     return {'movables': movables, 'movable': movable, 'static': static, 'whole': whole}
 
 def get_gt_point_clouds(gt_dir: str, K=1, n_samples: int=100_000, reverse=True) -> dict:
@@ -199,9 +225,9 @@ def compute_chamfer(recon_pts: np.ndarray, gt_pts: np.ndarray) -> float:
 
 def eval_geo_metrics(pred_pc: dict, gt_pc: dict) -> dict:
     metric_dict = {'chamfer_dynamics': []}
-    for gt in gt_pc['movables']:
+    for pred in pred_pc['movables']:
         min_cd = np.inf
-        for pred in pred_pc['movables']:
+        for gt in gt_pc['movables']:
             cd = compute_chamfer(pred, gt)
             min_cd = min(min_cd, cd)
         metric_dict['chamfer_dynamics'].append(min_cd)
