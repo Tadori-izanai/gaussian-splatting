@@ -75,13 +75,6 @@ def cluster_demo(out_path: str, data_path: str, num_movable: int, thr: int=-5):
     clustering = DBSCAN(eps=0.008, min_samples=num_movable).fit(x)
 
     labels = clustering.labels_
-    # for k in np.unique(labels):
-    #     if k > 20:
-    #         continue
-    #     pts = x[labels == k]
-    #     if len(pts) < 1000:
-    #         continue
-    #     storePly(os.path.join(ply_path, f'clusters/points3d_{k}.ply'), pts, np.zeros_like(pts))
     pts = sorted(
         [(k, x[labels == k]) for k in np.unique_values(labels)],
         key=lambda item: len(item[1]), reverse=True
@@ -197,7 +190,7 @@ def eval_demo(out_path: str, data_path: str, num_movable: int, reverse=True):
     # pcd_pred = get_pred_point_cloud(out_path, K=num_movable, iters=20)
     pcd_gt = get_gt_point_clouds(os.path.join(data_path, 'gt/'), K=num_movable, reverse=reverse)
 
-    metrics_axis = eval_axis_metrics(trans_pred, trans_gt, reverse=reverse)
+    metrics_axis = eval_axis_metrics(trans_pred, trans_gt, reverse=reverse, out_path=out_path)
     metrics_cd = eval_geo_metrics(pcd_pred, pcd_gt)
     with open(os.path.join(out_path, 'metrics.json'), 'w') as outfile:
         json.dump(metrics_axis | metrics_cd, outfile, indent=4)
@@ -217,7 +210,7 @@ if __name__ == '__main__':
     # out = 'output/dta/fridge'
     # rev = True
 
-    ### ArtGS
+    ################## ArtGS ##################
     # K = 3
     # st = 'output/artgs/oven_st'
     # ed = 'output/artgs/oven_ed'
@@ -231,6 +224,19 @@ if __name__ == '__main__':
     # out = 'output/artgs/tbl3'
     # rev = True
 
+    # st = 'output/artgs/sto3_st'
+    # ed = 'output/artgs/sto3_ed'
+    # data = 'data/artgs/storage_45503'
+    # out = 'output/artgs/sto3'
+    # rev = True
+
+    # K = 4
+    # st = 'output/artgs/tbl4_st'
+    # ed = 'output/artgs/tbl4_ed'
+    # data = 'data/artgs/table_31249'
+    # out = 'output/artgs/tbl4'
+    # rev = False
+
     # K = 6
     # st = 'output/artgs/sto6_st'
     # ed = 'output/artgs/sto6_ed'
@@ -238,7 +244,7 @@ if __name__ == '__main__':
     # out = 'output/artgs/sto6'
     # rev = True
 
-    ### Ours
+    ################## Ours ##################
     K = 4
     st = 'output/tbr4_st'
     ed = 'output/tbr4_ed'
@@ -269,7 +275,7 @@ if __name__ == '__main__':
     # K = 7
     # st = 'output/nf_st'
     # ed = 'output/nf_ed'
-    # data = 'data/naifu101253'
+    # data = 'data/naifu2'
     # out = 'output/nf'
     # rev = False
     # cd_thr = -6
@@ -282,8 +288,8 @@ if __name__ == '__main__':
     # cluster_demo(out, data, K, thr=cd_thr)
     # init_demo_from_dbscan(out, st, ed, K)
 
-    # gmm_am_optim_demo(out, st, ed, data, num_movable=K)
+    gmm_am_optim_demo(out, st, ed, data, num_movable=K)
     # mp_joint_optimization_demo(out, st, data, num_movable=K)
-    eval_demo(out, data, num_movable=K, reverse=rev)
+    # eval_demo(out, data, num_movable=K, reverse=rev)
 
     pass

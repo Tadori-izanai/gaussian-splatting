@@ -349,7 +349,7 @@ def decompose_covariance_matrix(cov: torch.tensor) -> tuple[torch.tensor, torch.
     return scaling_values, rotation_matrices
 
 def get_rotation_axis(r: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    r = r.T
+    # r = r.T
     eigenvalues, eigenvectors = np.linalg.eig(r)
     axis = None
     for i in range(3):

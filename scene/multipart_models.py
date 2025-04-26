@@ -31,6 +31,15 @@ from train import prepare_output_and_logger
 
 from plyfile import PlyData, PlyElement
 
+COLORS = [
+    (1, 0, 0),  # r
+    (0, 1, 0),  # g
+    (0, 0, 1),  # b
+    (1, 1, 0),  # yellow
+    (1, 0, 1),  # magenta
+    (0, 1, 1),  # cyan
+    (1, .5, 0), # orange
+]
 
 class MPArtModelBasic:
     def setup_args(self):
@@ -71,6 +80,10 @@ class MPArtModelBasic:
             nn.Parameter(torch.tensor([0, 0, 0], dtype=torch.float, device='cuda').requires_grad_(True))
             for _ in range(self.num_movable)
         ]
+        self._c = [
+            nn.Parameter(torch.tensor([0, 0, 0], dtype=torch.float, device='cuda').requires_grad_(True))
+            for _ in range(self.num_movable)
+        ]
         self.r_activation = None
         self.gaussians = gaussians
         self.optimizer = None
@@ -105,7 +118,11 @@ class MPArtModelBasic:
 
     @property
     def get_t(self):
-        return self._t
+        # return self._t
+        return [
+            -torch.matmul(c, r) + c + t
+            for c, t, r in zip(self._c, self._t, self.get_r)
+        ]
 
     @property
     def get_r(self):
@@ -140,6 +157,7 @@ class MPArtModelBasic:
             {'params': self._column_vec1, 'lr': training_args.column_lr, "name": "column_vec1"},
             {'params': self._column_vec2, 'lr': training_args.column_lr, "name": "column_vec2"},
             {'params': self._t, 'lr': training_args.t_lr * self.gaussians.spatial_lr_scale, "name": "t"},
+            {'params': self._c, 'lr': training_args.t_lr * self.gaussians.spatial_lr_scale, "name": "c"},
         ]
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
@@ -167,6 +185,7 @@ class GMMArtModel(MPArtModelBasic):
         self.opt.cd_weight = None
         self.opt.center_weight = None
         self.opt.ppp_weight = None
+        self.opt.cr_weight = None
         self.opt.depth_weight = 1.0
         self.opt.cd_weight = 1.0
         self.opt.center_weight = 0.1
@@ -197,6 +216,7 @@ class GMMArtModel(MPArtModelBasic):
         self._opacity = nn.Parameter(
             torch.zeros(num_movable, dtype=torch.float, device='cuda').requires_grad_(True)
         )
+        self._p = 1.0
 
         def build_inverse_covariance_from_scaling_rotation(scaling, rot_col1, rot_col2):
             ss = torch.diag_embed(1 / (scaling + 1e-8))
@@ -264,7 +284,7 @@ class GMMArtModel(MPArtModelBasic):
     def get_ppp(self, pts=None, tau=1.0, eps=1e-8):
         if pts is None:
             pts = self.original_xyz
-        quad = eval_quad(pts.unsqueeze(1) - self.get_mu, self.get_inverse_covariance)
+        quad = eval_quad(pts.unsqueeze(1) - self.get_mu, self.get_inverse_covariance) ** self._p
         ppp = self.get_opacity * torch.exp(-quad / tau)
         ppp = ppp.clamp(eps, 1 - eps)
         return ppp / ppp.sum(dim=1, keepdim=True)
@@ -318,6 +338,10 @@ class GMMArtModel(MPArtModelBasic):
         mu = torch.tensor(np.load(os.path.join(model_path, 'mu_init.npy')), device='cuda')
         sigma = torch.tensor(np.load(os.path.join(model_path, 'sigma_init.npy')), device='cuda')
         self._set_init_probabilities(prob, mu, sigma, scaling_modifier)
+        self._c = [
+            nn.Parameter(torch.tensor(c, dtype=torch.float, device='cuda').requires_grad_(True))
+            for c in mu
+        ]
 
     def _get_slot_deform(self):
         qrs = []
@@ -373,19 +397,10 @@ class GMMArtModel(MPArtModelBasic):
 
     def save_ppp_vis(self, path: str):
         mkdir_p(os.path.dirname(path))
-        colors = [
-            (1, 0, 0),
-            (0, 1, 0),
-            (0, 0, 1),
-            (1, 1, 0),
-            (1, 0, 1),
-            (0, 1, 1),
-        ]
-
         ppp = self.get_ppp()
         fused_color = torch.zeros(self.original_gaussians.size(), 3)
         for k in range(self.num_movable):
-            c = torch.tensor(colors[k % len(colors)])
+            c = torch.tensor(COLORS[k % len(COLORS)])
             fused_color += ppp[:, k].unsqueeze(1).cpu() * c
 
         self.original_gaussians.save_vis(path, fused_color)
@@ -396,6 +411,7 @@ class GMMArtModel(MPArtModelBasic):
             {'params': self._column_vec1, 'lr': training_args.column_lr, "name": "column_vec1"},
             {'params': self._column_vec2, 'lr': training_args.column_lr, "name": "column_vec2"},
             {'params': self._t, 'lr': training_args.t_lr * self.gaussians.spatial_lr_scale, "name": "t"},
+            {'params': self._c, 'lr': training_args.t_lr * self.gaussians.spatial_lr_scale, "name": "c"},
             {'params': [self._prob], 'lr': training_args.prob_lr, "name": "prob"},
             {'params': [self._xyz], 'lr': training_args.position_lr * self.gaussians.spatial_lr_scale, "name": "xyz"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
@@ -410,8 +426,14 @@ class GMMArtModel(MPArtModelBasic):
         # self._rotation_col1.requires_grad_(False)
         # self._rotation_col2.requires_grad_(False)
         # self._opacity.requires_grad_(False)
+        for c in self._c:
+            c.requires_grad_(False)
 
     def _show_losses(self, iteration: int, losses: dict):
+        if iteration == self.opt.warmup_until_iter:
+            self.save_ppp_vis(
+                os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration-1}/point_cloud.ply')
+            )
         if iteration in [1000, 5000, 9000, 15000, self.opt.iterations]:
             self.gaussians.save_ply(
                 os.path.join(self.dataset.model_path, f'point_cloud/iteration_{iteration}/point_cloud.ply'),
@@ -428,6 +450,7 @@ class GMMArtModel(MPArtModelBasic):
         for k in np.arange(self.num_movable):
             print(f't{k}:', self.get_t[k].detach().cpu().numpy())
             print(f'r{k}:', self.get_r[k].detach().cpu().numpy())
+            print(f'_c{k}, _t{k}:', self._c[k].detach().cpu().numpy(), self._t[k].detach().cpu().numpy())
         print()
 
     def _eval_losses(self, render_pkg, viewpoint_cam, gaussians, gt_gaussians=None, requires_cd=False):
@@ -491,6 +514,8 @@ class GMMArtModel(MPArtModelBasic):
         ema_loss_for_log = 0.0
         for i in range(1, iterations + 1):
             requires_cd = self.opt.cd_from_iter <= i <= self.opt.cd_until_iter
+            # self._p = self.cosine_anneal(i, start_step=0, final_step=self.opt.warmup_until_iter, start_value=1, final_value=2)
+            # self._p = self.cosine_anneal(i, start_step=0, final_step=self.opt.iterations, start_value=1, final_value=2)
             self.deform(i)
 
             # Pick a random Camera

@@ -38,6 +38,7 @@ def get_gt_motion_params(data_path: str, reverse=False):
 def interpret_transforms(translations: np.ndarray, rotations: np.ndarray) -> list[dict]:
     results = []
     for t, r in zip(translations, rotations):
+        r = r.T
         trans_info = {}
         theta = np.acos((np.trace(r) - 1) / 2)
         if theta < 0.15:
@@ -52,6 +53,11 @@ def interpret_transforms(translations: np.ndarray, rotations: np.ndarray) -> lis
             trans_info['type'] = 'rotate'
             trans_info['axis'] = {'o': o.tolist(), 'd': d.tolist()}
             trans_info['rotate'] = float(np.rad2deg(theta))
+
+            r_chk = rotation_matrix_from_axis_angle(d, theta)
+            if np.trace(np.dot(r.T, r_chk)) < 2.99792458:
+                print('reversed:', np.trace(np.dot(r.T, r_chk)))
+                trans_info['rotate'] = -trans_info['rotate']
         results.append(trans_info)
     return results
 
@@ -69,15 +75,15 @@ def sort_trans_gt(trans_pred: list[dict], trans_gt: list[dict], reverse: bool) -
             d_pred = np.array(pred_info['axis']['d'])
             o_gt = np.array(gt_info['axis']['o'])
             o_pred = np.array(pred_info['axis']['o'])
-            theta_gt = gt_info['rotate'] if not reverse else -gt_info['rotate']
-            theta_pred = pred_info['rotate']
-            r_diff = np.dot(
-                rotation_matrix_from_axis_angle(d_gt / np.linalg.norm(d_gt), theta_gt).T,
-                rotation_matrix_from_axis_angle(d_pred / np.linalg.norm(d_pred), theta_pred)
+            theta_gt = np.deg2rad(gt_info['rotate'] if not reverse else -gt_info['rotate'])
+            theta_pred = np.deg2rad(pred_info['rotate'])
+            r_diff = np.matmul(
+                rotation_matrix_from_axis_angle(d_gt / np.linalg.norm(d_gt), theta_gt),
+                rotation_matrix_from_axis_angle(d_pred / np.linalg.norm(d_pred), theta_pred).T
             )
-            rot_diff = np.rad2deg(np.arccos(np.clip((np.trace(r_diff) - 1) / 2, -1, 1)))
+            rot_diff = np.rad2deg(np.arccos(np.clip((np.trace(r_diff) - 1.0) * 0.5, a_min=-1, a_max=1)))
             pos_diff = line_distance(o_pred, d_pred, o_gt, d_gt)
-            difference = rot_diff + pos_diff
+            difference = rot_diff + pos_diff * 10
         if pred_info['type'] == gt_info['type'] and gt_info['type'] == 'translate':
             d_gt = np.array(gt_info['axis']['d'])
             d_pred = np.array(pred_info['axis']['d'])
@@ -97,12 +103,11 @@ def sort_trans_gt(trans_pred: list[dict], trans_gt: list[dict], reverse: bool) -
         rm = None
         diff_min = 514
         for gt in trans_gt:
-            if gt['type'] != pred['type']:
-                continue
-            diff = eval_diff(pred, gt)
-            if diff < diff_min:
-                diff_min = diff
-                rm = gt
+            if gt['type'] == pred['type']:
+                diff = eval_diff(pred, gt)
+                if diff < diff_min:
+                    diff_min = diff
+                    rm = gt
         trans_gt_sorted.append(rm)
         if rm is not None:
             trans_gt.remove(rm)
@@ -116,8 +121,10 @@ def line_distance(a_o, a_d, b_o, b_d):
     else:
         return np.abs(np.dot(normal, a_o - b_o)) / normal_length
 
-def eval_axis_and_state(axis_a, axis_b):
+def eval_axis_and_state(axis_a, axis_b, reverse):
     a_d, b_d = np.array(axis_a['axis']['d']), np.array(axis_b['axis']['d'])
+    a_d /= np.linalg.norm(a_d)
+    b_d /= np.linalg.norm(b_d)
     angle = np.rad2deg(np.arccos(np.dot(a_d, b_d) / np.linalg.norm(a_d) / np.linalg.norm(b_d)))
     angle = min(angle, 180 - angle)
 
@@ -126,8 +133,10 @@ def eval_axis_and_state(axis_a, axis_b):
         distance = line_distance(a_o, a_d, b_o, b_d)
 
         a_theta, b_theta = np.deg2rad(axis_a['rotate']), np.deg2rad(axis_b['rotate'])
-        if (a_theta * a_d) @ (b_theta * b_d) < 0:
+        if reverse:
             b_theta = -b_theta
+        # if (a_theta * a_d) @ (b_theta * b_d) < 0:
+        #     b_theta = -b_theta
         a_r, b_r = rotation_matrix_from_axis_angle(a_d, a_theta), rotation_matrix_from_axis_angle(b_d, b_theta)
         r_diff = np.matmul(a_r, b_r.T)
         state = np.rad2deg(np.arccos(np.clip((np.trace(r_diff) - 1.0) * 0.5, a_min=-1, a_max=1)))
@@ -135,23 +144,28 @@ def eval_axis_and_state(axis_a, axis_b):
         distance = 0
         a_td, b_td = axis_a['translate'], axis_b['translate']
         a_t, b_t = a_td * a_d, b_td * b_d
-        if a_t @ b_t < 0:
+        # if a_t @ b_t < 0:
+        #     b_t = -b_t
+        if reverse:
             b_t = -b_t
         state = np.linalg.norm(a_t - b_t)
 
     return angle, distance, state
 
-def eval_axis_metrics(trans_pred: list[dict], trans_gt: list[dict], reverse: bool) -> dict:
+def eval_axis_metrics(trans_pred: list[dict], trans_gt: list[dict], reverse: bool, out_path=None) -> dict:
     for info in trans_gt:
         info[info['type']] = info[info['type']]['r'] - info[info['type']]['l']
     trans_gt = sort_trans_gt(trans_pred, trans_gt, reverse)
+    if out_path is not None:
+        with open(os.path.join(out_path, 'trans_gt.json'), 'w') as outfile:
+            json.dump(trans_gt, outfile, indent=4)
 
     metric_dict = {'axes': []}
     for pred, gt in zip(trans_pred, trans_gt):
         if gt is None:
             metric_dict['axes'].append({'axis_angle': -1, 'axis_dist': -1, 'theta_diff': -1})
             continue
-        angle, distance, state = eval_axis_and_state(pred, gt)
+        angle, distance, state = eval_axis_and_state(pred, gt, reverse)
         metric_dict['axes'].append(
             {'axis_angle': angle, 'axis_dist': distance * 10, 'theta_diff': state}
         )

@@ -43,6 +43,7 @@ if __name__ == '__main__':
     # data = '../data/teeburu34178'
     # data = '../data/teeburu34610'
     # data = '../data/naifu101253'
+    # data = '../data/naifu2'
     # data = '../data/oobun7201'
     data = '../data/sutoreeji40417'
 
