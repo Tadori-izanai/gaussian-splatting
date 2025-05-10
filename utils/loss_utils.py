@@ -68,9 +68,9 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean(1).mean(1).mean(1)
 
 
-def sample_pts(pts: torch.Tensor, n_samples: int) -> torch.Tensor:
+def sample_pts(pts: torch.Tensor, n_samples: int=-1) -> torch.Tensor:
     n_pts = pts.shape[0]
-    if n_samples > n_pts:
+    if n_samples == -1 or n_samples > n_pts:
         return pts
     indices = torch.randperm(n_pts)[:n_samples]
     return pts[indices]

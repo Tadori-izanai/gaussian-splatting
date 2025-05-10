@@ -594,3 +594,10 @@ def init_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_mov
     np.save(os.path.join(out_path, 'mu_init.npy'), mu.detach().cpu().numpy())
     np.save(os.path.join(out_path, 'sigma_init.npy'), sigma.detach().cpu().numpy())
 
+def test_get_ppp(out_path, st_path, ed_path, data_path, num_movable):
+    gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
+    gaussians_ed = get_gaussians(ed_path, from_chk=True).cancel_grads()
+    am = GMMArtModel(gaussians_ed, num_movable, new_scheme=False)
+    am.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path, thr=cd_thr)
+    am.set_init_params(out_path, scaling_modifier=1)
+    am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_99/point_cloud.ply'))

@@ -197,6 +197,13 @@ def eval_demo(out_path: str, data_path: str, num_movable: int, reverse=True):
 
 if __name__ == '__main__':
     ### paris and dta
+    # K = 1
+    # st = 'output/paris/usb_st'
+    # ed = 'output/paris/usb_ed'
+    # data = 'data/dta/USB_100109'
+    # out = 'output/paris/usb'
+    # rev = True
+
     # K = 2
     # st = 'output/dta/storage_st'
     # ed = 'output/dta/storage_ed'

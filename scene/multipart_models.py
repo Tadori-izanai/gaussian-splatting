@@ -10,6 +10,7 @@ import math
 import copy
 import numpy as np
 from pytorch3d.loss import chamfer_distance
+from pytorch3d.ops import knn_points
 
 from typing_extensions import override
 
@@ -217,6 +218,7 @@ class GMMArtModel(MPArtModelBasic):
             torch.zeros(num_movable, dtype=torch.float, device='cuda').requires_grad_(True)
         )
         self._p = 1.0
+        self.ppp = None
 
         def build_inverse_covariance_from_scaling_rotation(scaling, rot_col1, rot_col2):
             ss = torch.diag_embed(1 / (scaling + 1e-8))
@@ -241,6 +243,7 @@ class GMMArtModel(MPArtModelBasic):
         self.pcds = []      # start state clustered pcds
         self.pcds_sample = []
         self.pcds_deformed = []
+        self.pcd_knn_indices = []
 
         self.new_scheme = new_scheme
         self.gaussians.duplicate(2 if new_scheme else self.num_movable + 1)
@@ -253,6 +256,13 @@ class GMMArtModel(MPArtModelBasic):
     @property
     def get_mu(self):
         return self._xyz
+    
+    @property
+    def get_rotation(self):
+        rr = torch.ones(self.num_movable, 3, 3, dtype=self._rotation_col1.dtype, device=self._rotation_col1.device)
+        for i in range(self.num_movable):
+            rr[i] = self.gram_schmidt(self._rotation_col1[i], self._rotation_col2[i])
+        return rr
 
     @property
     def get_scaling(self):
@@ -281,10 +291,50 @@ class GMMArtModel(MPArtModelBasic):
             value = a * math.cos(math.pi * progress) + b
         return value
 
-    def get_ppp(self, pts=None, tau=1.0, eps=1e-8):
+    def _cal_relative_pos(self, x, mu=None, rot=None, scale=None):
+        mu = self.get_mu if mu is None else mu      # x [N, 3], mu [K, 3]
+        rot = self.get_rotation if rot is None else rot     # rot [K, 3, 3]
+        scale = self.get_scaling if scale is None else scale # scale [K, 3]
+        # [N, K, 3]
+        return torch.einsum('kji,nkj->nki', rot, x.unsqueeze(1) - mu) / scale
+
+    def get_ppp(self, pts=None, deformed=False, tau=1.0, eps=1e-8):
+        if (self.ppp is not None) and (pts is None):
+            return self.ppp
+        save = (pts is None)
+        if deformed:
+            assert pts is not None
+            r = torch.stack(self.get_r).to(dtype=self.get_mu.dtype)
+            t = torch.stack(self.get_t).to(dtype=self.get_mu.dtype)
+            mu = torch.einsum('kji,kj->ki', r, self.get_mu) + t
+            rot = r.transpose(1, 2) @ self.get_rotation
+            rel_pos = self._cal_relative_pos(pts, mu, rot, self.get_scaling)
+        else:
+            if pts is None:
+                pts = self.original_xyz
+            rel_pos = self._cal_relative_pos(pts)
+        quad = torch.sum(rel_pos ** 2, dim=-1) ** self._p  # [N, K]
+        ppp = self.get_opacity * torch.exp(-quad / tau)
+        ppp = ppp.clamp(eps, 1 - eps)
+        ppp /= ppp.sum(dim=1, keepdim=True)
+
+        self.ppp = ppp if save else self.ppp
+        return ppp
+
+    def get_ppp_naive(self, pts=None, deformed=False, tau=1.0, eps=1e-8):
+        inv_cov = self.get_inverse_covariance
+        mu = self.get_mu
+        if deformed:
+            assert pts is not None
+            r = torch.stack(self.get_r).to(dtype=mu.dtype)
+            t = torch.stack(self.get_t).to(dtype=mu.dtype)
+            # r = torch.tensor(np.load(os.path.join(self.dataset.model_path, 'r_final.npy'))).to(device='cuda', dtype=mu.dtype)
+            # t = torch.tensor(np.load(os.path.join(self.dataset.model_path, 't_final.npy'))).to(device='cuda', dtype=mu.dtype)
+            inv_cov = r.transpose(1, 2) @ inv_cov @ r
+            mu = torch.einsum('kji,kj->ki', r, mu) + t
         if pts is None:
             pts = self.original_xyz
-        quad = eval_quad(pts.unsqueeze(1) - self.get_mu, self.get_inverse_covariance) ** self._p
+        quad = eval_quad(pts.unsqueeze(1) - mu, inv_cov) ** self._p
         ppp = self.get_opacity * torch.exp(-quad / tau)
         ppp = ppp.clamp(eps, 1 - eps)
         return ppp / ppp.sum(dim=1, keepdim=True)
@@ -315,9 +365,16 @@ class GMMArtModel(MPArtModelBasic):
                 self.pcds.append(pcd)
                 self.pcds_deformed.append(pcd)
                 self.pcds_sample.append(sample_pts(pcd, len(pcd) // 10))
+                # self.pcds_sample.append(sample_pts(pcd, 1000))
             if len(self.pcds) == self.num_movable:
                 break
         assert len(self.pcds) == self.num_movable
+
+        for k in range(self.num_movable):
+            p1 = self.pcds_sample[k].unsqueeze(0)
+            p2 = self.original_xyz.detach().unsqueeze(0)
+            _, indices, _ = knn_points(p1, p2, K=1)
+            self.pcd_knn_indices.append(indices.flatten())
 
     def _set_init_probabilities(self, prob=None, mu=None, sigma=None, scaling_modifier=1.0, eps=1e-6):
         if prob is not None:
@@ -388,8 +445,10 @@ class GMMArtModel(MPArtModelBasic):
         for k in range(self.num_movable):
             indices = slice(num * (k + 1), num * (k + 2))
             r_inv_quat = mat2quat(r[k].transpose(1, 0))
-            self.gaussians.get_xyz[indices] = torch.matmul(self.original_xyz, r[k]) + t[k]
-            self.gaussians.get_rotation_raw[indices] = quat_mult(r_inv_quat, self.original_rotation)
+            # mask_visible = self.gaussians.get_opacity_raw[indices].squeeze(-1) > 0.005
+            mask_visible = slice(None)
+            self.gaussians.get_xyz[indices][mask_visible] = torch.matmul(self.original_xyz[mask_visible], r[k]) + t[k]
+            self.gaussians.get_rotation_raw[indices][mask_visible] = quat_mult(r_inv_quat, self.original_rotation[mask_visible])
             self.gaussians.get_opacity_raw[indices] = inverse_sigmoid(self.original_opacity * prob * ppp[:, k])
             self.pcds_deformed[k] = torch.matmul(self.pcds[k], r[k]) + t[k]
         self.gaussians.get_opacity_raw[:num] = inverse_sigmoid((1 - prob) * self.original_opacity)
@@ -421,11 +480,12 @@ class GMMArtModel(MPArtModelBasic):
         ]
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         # self._prob.requires_grad_(False)
-        # self._xyz.requires_grad_(False)
-        # self._scaling.requires_grad_(False)
-        # self._rotation_col1.requires_grad_(False)
-        # self._rotation_col2.requires_grad_(False)
-        # self._opacity.requires_grad_(False)
+        if self.num_movable == 1:
+            self._xyz.requires_grad_(False)
+            self._scaling.requires_grad_(False)
+            self._rotation_col1.requires_grad_(False)
+            self._rotation_col2.requires_grad_(False)
+            self._opacity.requires_grad_(False)
         for c in self._c:
             c.requires_grad_(False)
 
@@ -481,24 +541,38 @@ class GMMArtModel(MPArtModelBasic):
             # definite_gaussians.get_xyz = torch.cat(pc_lst, dim=0)
             # losses['cd'] = eval_cd_loss_sd(definite_gaussians, gt_gaussians)
             pcd_deformed = torch.cat(self.pcds_deformed, dim=0)
-            dist, _ = chamfer_distance(pcd_deformed.unsqueeze(0), self.pcd_gt.unsqueeze(0), batch_reduction=None)
+            x = sample_pts(pcd_deformed, 5000)
+            y = sample_pts(self.pcd_gt, -1)
+            dist, _ = chamfer_distance(x.unsqueeze(0), y.unsqueeze(0), batch_reduction=None)
             losses['cd'] = dist[0]
             loss += self.opt.cd_weight * losses['cd']
         if (self.opt.depth_weight is not None) and (viewpoint_cam.image_depth is not None):
             gt_depth = viewpoint_cam.image_depth.cuda()
             losses['d'] = eval_depth_loss(render_pkg['depth'], gt_depth)
             loss += self.opt.depth_weight * losses['d']
-        if self.opt.center_weight is not None:
+        if self.opt.center_weight is not None and self.num_movable > 1:
             mask = self.get_ppp() * self.get_prob.unsqueeze(-1) # [N, K]
             c = torch.einsum('nk,nj->kj', mask, self.original_xyz.to(dtype=mask.dtype))  # [K, 3]
             c /= mask.sum(dim=0).unsqueeze(-1)
             losses['center'] = nn.functional.mse_loss(self.get_mu, c)
             loss += self.opt.center_weight * losses['center']
-        if self.opt.ppp_weight is not None:
+        if self.opt.ppp_weight is not None and self.num_movable > 1:
             losses['ppp'] = 0
+            # for k in range(self.num_movable):
+            #     losses['ppp'] += self.get_ppp(
+            #         pts=torch.cat([self.pcds_sample[i] for i in range(self.num_movable) if i != k], dim=0)
+            #     )[:, k].mean()
+                # losses['ppp'] += self.get_ppp(
+                #     pts=torch.cat(
+                #         [
+                #             torch.matmul(self.pcds_sample[i], self.get_r[i]) + self.get_t[i]
+                #             for i in range(self.num_movable) if i != k
+                #         ], dim=0
+                #     ), deformed=True
+                # )[:, k].mean()
             for k in range(self.num_movable):
-                losses['ppp'] += self.get_ppp(
-                    pts=torch.cat([self.pcds_sample[i] for i in range(self.num_movable) if i != k], dim=0)
+                losses['ppp'] += torch.cat(
+                    [self.get_ppp()[self.pcd_knn_indices[i]] for i in range(self.num_movable) if i != k], dim=0
                 )[:, k].mean()
             loss += self.opt.ppp_weight * losses['ppp'] / self.num_movable
         return loss, losses
@@ -521,6 +595,7 @@ class GMMArtModel(MPArtModelBasic):
             # Pick a random Camera
             viewpoint_cam, background = bws.pop_black() if (i % 2 == 0) else bws.pop_white()
             render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, background)
+            # render_pkg = render(viewpoint_cam, self.gaussians[self.gaussians.get_opacity.squeeze(-1) > 0.005], self.pipe, background)
             loss, losses = self._eval_losses(render_pkg, viewpoint_cam, self.gaussians, gt_gaussians, requires_cd=requires_cd)
             loss.backward()
 
@@ -539,6 +614,7 @@ class GMMArtModel(MPArtModelBasic):
                     self.gaussians.get_opacity_raw = self.gaussians.get_opacity_raw.detach()
                     self.gaussians.get_xyz = self.gaussians.get_xyz.detach()
                     self.gaussians.get_rotation_raw = self.gaussians.get_rotation_raw.detach()
+                    self.ppp = None
 
                 if i == self.opt.warmup_until_iter:
                     print('')
