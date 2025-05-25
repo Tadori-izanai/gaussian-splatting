@@ -16,6 +16,7 @@ import cv2
 from PIL import Image
 from tqdm import tqdm
 from loftr_wrapper import LoftrRunner
+from corr2world import process_data as corr2world
 
 def load_json_to_dict(file_path: str) -> dict:
     with open(file_path, 'r') as json_file:
@@ -80,8 +81,8 @@ def compute_correspondence(model: LoftrRunner, src_dict, tgt_dict,
 
     if 'no_filter' in filter_level_list:
         filtered_corr['no_filter'].append((src_coords, tgt_coords))
-    # if visualize:
-    #     draw_corr(src_rgb, tgt_rgb, src_coords, tgt_coords, pjoin(vis_path, f'0_1_no_filter_{valid_total}_of_{loftr_total}'))
+    if visualize:
+        draw_corr(src_rgb, tgt_rgb, src_coords, tgt_coords, pjoin(vis_path, f'0_1_no_filter_{valid_total}_of_{loftr_total}'))
     return filtered_corr
 
 def run_source_img(model, folder, src_frame,
@@ -115,7 +116,9 @@ def run_source_img(model, folder, src_frame,
 
     return {
         filter_level: [
-            {src_frame['file_path']: tgt_corr[0], tgt_frame['file_path']: tgt_corr[1]} for tgt_corr in corr
+            # {src_frame['file_path']: tgt_corr[0], tgt_frame['file_path']: tgt_corr[1]} for tgt_corr in corr
+            {'src_corr': tgt_corr[0], 'tgt_corr': tgt_corr[1],
+             'src_path': src_frame['file_path'], 'tgt_path': tgt_frame['file_path']} for tgt_corr in corr
         ] for filter_level, corr in all_corr.items()
     }
 
@@ -138,9 +141,19 @@ def run_folder(model, folder):
             )
 
 if __name__ == '__main__':
-    # data_path = '../data/teeburu34178'
-    data_path = '../data/teeburu34610'
+    data_path = '../data/naifu2'
+    data_path = '../data/oobun7201'
+    data_path = '../data/sutoreeji40417'
+    data_path = '../data/teeburu34178'
+    # data_path = '../data/teeburu34610'
+
+    # data_path = '../data/artgs/oven_101908'
+    # data_path = '../data/artgs/storage_45503'
+    # data_path = '../data/artgs/storage_47648'
+    # data_path = '../data/artgs/table_25493'
+    # data_path = '../data/artgs/table_31249'
 
     loftr = LoftrRunner()
     run_folder(loftr, data_path)
+    corr2world(data_path)
     pass

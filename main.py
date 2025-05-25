@@ -297,6 +297,6 @@ if __name__ == '__main__':
 
     gmm_am_optim_demo(out, st, ed, data, num_movable=K)
     # mp_joint_optimization_demo(out, st, data, num_movable=K)
-    # eval_demo(out, data, num_movable=K, reverse=rev)
+    eval_demo(out, data, num_movable=K, reverse=rev)
 
     pass

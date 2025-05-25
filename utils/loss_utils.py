@@ -80,9 +80,9 @@ def eval_img_loss(image, gt_image, opt) -> torch.Tensor:
     loss = (1.0 - opt.lambda_dssim) * ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
     return loss
 
-def eval_depth_loss(depth, gt_depth) -> torch.Tensor:
+def eval_depth_loss(depth, gt_depth, scaling=1.0) -> torch.Tensor:
     ll1 = l1_loss(depth, gt_depth)
-    loss = torch.log(1 + ll1)
+    loss = torch.log(1 + scaling * ll1) / scaling
     return loss
 
 def eval_cd_loss(gaussians: GaussianModel, gt_gaussians: GaussianModel, n_samples=10000) -> torch.Tensor:

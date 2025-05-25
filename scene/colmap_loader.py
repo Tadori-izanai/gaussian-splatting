@@ -338,6 +338,14 @@ def extract_world_pts(
     else:
         color_map = []
 
+    # # Normalized device coordinates (NDC)
+    # # Camera space coordinates
+    # # World space coordinates
+    world_coords = xyd_to_world_coords(
+        x_valid, y_valid, depth_valid, image_width, image_height, inverse_projection, inverse_view)
+    return world_coords.tolist(), color_map
+
+def xyd_to_world_coords(x_valid, y_valid, depth_valid, image_width, image_height, inverse_projection, inverse_view):
     # Normalized device coordinates (NDC)
     ndc_x = (2.0 * x_valid / image_width) - 1.0
     ndc_y = 1.0 - (2.0 * y_valid / image_height)
@@ -353,7 +361,7 @@ def extract_world_pts(
     # World space coordinates
     world_homogeneous = np.dot(camera_homogeneous, inverse_view.T)  # Transpose inverse_view
     world_coords = world_homogeneous[:, :3]
-    return world_coords.tolist(), color_map
+    return world_coords
 
 def get_pcd_from_depths(cam_infos: list, num_pts: int=100_000) -> tuple[np.ndarray, np.ndarray]:
     world_coords = []
@@ -381,3 +389,21 @@ def get_pcd_from_depths(cam_infos: list, num_pts: int=100_000) -> tuple[np.ndarr
     colors = np.array(colors)[indices] if len(colors) == len(world_coords) else np.array(colors)
     world_coords = np.array(world_coords)[indices]
     return world_coords, colors
+
+def proj_corr_to_world(cam_info, corr: np.ndarray) -> np.ndarray:
+    zfar = 100.0
+    znear = 0.01
+    projection_matrix = getProjectionMatrix(znear, zfar, cam_info.FovX, cam_info.FovY, blender_convention=True).cpu().numpy()
+    inverse_projection = np.linalg.inv(projection_matrix)
+
+    w2c_colmap = getWorld2View(cam_info.R, cam_info.T)
+    c2w_colmap = np.linalg.inv(w2c_colmap)
+    c2w_blender = c2w_colmap.copy()
+    c2w_blender[:3, 1:3] *= -1
+    inverse_view = c2w_blender
+
+    depth_map = cam_info.image_d
+    x, y = corr[:, 0], corr[:, 1]
+    d = -depth_map[y, x]
+    world_coords = xyd_to_world_coords(x, y, d, cam_info.width, cam_info.height, inverse_projection, inverse_view)
+    return world_coords

@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import os
 import torch
 import sys
 from datetime import datetime
@@ -416,3 +417,42 @@ def get_source_path(cfg_path: str) -> str:
     # Split at next comma and take first part, remove quotes and whitespace
     source_path = path_part.split(',')[0].strip("'").strip()
     return source_path
+
+def find_files_with_suffix(directory, suffix):
+    if not os.path.exists(directory):
+        return []
+    matching_files = []
+    for filename in os.listdir(directory):
+        if filename.endswith(suffix):
+            matching_files.append(filename)
+    return matching_files
+
+def find_close(x: np.ndarray, y: np.ndarray, threshold: float) -> np.ndarray:
+    """
+    Finds indices of points in y close to points in x using SciPy's KDTree.
+    Args:
+        x: A tensor of shape (N, 3) representing the first point cloud.
+        y: A tensor of shape (M, 3) representing the second point cloud.
+        threshold: The maximum distance for a point in y to be considered "close".
+    Returns:
+        A tensor containing the indices of points in y that satisfy the
+        closeness condition.
+    """
+    kdtree = KDTree(x)
+
+    # Query the KDTree for each point in y
+    # k=1 finds the nearest neighbor
+    # distance_upper_bound applies the threshold efficiently
+    distances, indices = kdtree.query(y, k=1, distance_upper_bound=threshold)
+
+    # SciPy's query with distance_upper_bound returns inf for distances
+    # and N (or len(x)) for indices where no neighbor is found within the threshold.
+    # We need to filter these out.
+    # Valid indices are those that are NOT equal to N (or x.shape[0])
+    valid_mask = indices != x.shape[0]
+
+    # The indices returned by kdtree.query are indices in y_np corresponding
+    # to the points that found a neighbor within the threshold in x.
+    # We can get these indices directly from the boolean mask's 'where'.
+    close_indices = np.where(valid_mask)[0]
+    return close_indices
