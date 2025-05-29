@@ -296,7 +296,7 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
             xyz, rgb, _ = read_points3D_text(txt_path)
         else:
             # Since this data set has no colmap data, we start with random points
-            num_pts = 1000_000     # 100_000
+            num_pts = 10_00_000     # 100_000
             print(f"Generating random point cloud ({num_pts})...")
             
             # We create random points inside the bounds of the synthetic Blender scenes
@@ -308,7 +308,8 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
             xyz, rgb = get_pcd_from_depths(train_cam_infos, num_pts)
 
             storePly(os.path.join(path, "points3d.ply"), xyz, rgb)
-            indices = np.random.choice(np.arange(num_pts), size=num_pts // 10, replace=False)
+            # indices = np.random.choice(np.arange(num_pts), size=num_pts // 10, replace=False)
+            indices = np.random.choice(np.arange(num_pts), size=100_000, replace=False)
             xyz, rgb = xyz[indices], rgb[indices]
 
         storePly(ply_path, xyz, rgb)

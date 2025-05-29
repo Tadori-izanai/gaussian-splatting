@@ -30,6 +30,7 @@ from metric_utils import get_gt_motion_params, interpret_transforms, eval_axis_m
     get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics
 
 cd_thr = -5
+dbs_eps = 0.008
 
 def train_single_demo(path, data_path):
     dataset, pipes, opt = get_default_args()
@@ -71,8 +72,7 @@ def cluster_demo(out_path: str, data_path: str, num_movable: int, thr: int=-5):
         distances = np.sort(distances[:, -1])
         plot_hist(distances, os.path.join(ply_path, 'dist-1m.png'))
 
-    # clustering = DBSCAN(eps=0.01, min_samples=num_movable).fit(x)
-    clustering = DBSCAN(eps=0.008, min_samples=num_movable).fit(x)
+    clustering = DBSCAN(eps=dbs_eps, min_samples=num_movable).fit(x)
 
     labels = clustering.labels_
     pts = sorted(
@@ -80,6 +80,10 @@ def cluster_demo(out_path: str, data_path: str, num_movable: int, thr: int=-5):
         key=lambda item: len(item[1]), reverse=True
     )
     for k, pcd in pts[:num_movable]:
+        if k == -1:
+            k1, pcd1 = pts[num_movable]
+            storePly(os.path.join(ply_path, f'clusters/points3d_{k1}.ply'), pcd1, np.zeros_like(pcd1))
+            continue
         storePly(os.path.join(ply_path, f'clusters/points3d_{k}.ply'), pcd, np.zeros_like(pcd))
     storePly(os.path.join(ply_path, f'points3d.ply'), x, np.zeros_like(x))
 
@@ -92,7 +96,6 @@ def init_demo_from_dbscan(out_path, st_path, ed_path, num_movable: int):
         os.path.join(out_path, 'point_cloud/iteration_10/point_cloud.ply'))
     plot_hist(mpp, os.path.join(out_path, 'mpp.png'))
     np.save(os.path.join(out_path, 'mpp_init.npy'), mpp.detach().cpu().numpy())
-    # return
 
     pts = []
     cluster_dir = os.path.join(out_path, 'clustering/clusters')
@@ -217,20 +220,53 @@ if __name__ == '__main__':
     # out = 'output/dta/fridge'
     # rev = True
 
-    ################## ArtGS ##################
-    # K = 3
-    # st = 'output/artgs/oven_st'
-    # ed = 'output/artgs/oven_ed'
-    # data = 'data/artgs/oven_101908'
-    # out = 'output/artgs/oven'
+    ################## Ours failed ##################
+    # K = 5
+    # st = 'output/single/tbr5_st'
+    # ed = 'output/single/tbr5_ed'
+    # data = 'data/teeburu34610'
+    # out = 'output/tbr5'
     # rev = False
 
-    # st = 'output/artgs/tbl3_st'
-    # ed = 'output/artgs/tbl3_ed'
-    # data = 'data/artgs/table_25493'
-    # out = 'output/artgs/tbl3'
-    # rev = True
+    # st = 'output/single/ob5_st'
+    # ed = 'output/single/ob5_ed'
+    # data = 'data/oobun7201'
+    # out = 'output/ob5'
+    # rev = False
 
+    # K = 7
+    # st = 'output/single/nf_st'
+    # ed = 'output/single/nf_ed'
+    # data = 'data/naifu2'
+    # out = 'output/nf'
+    # rev = False
+    # cd_thr = -6
+
+    # K = 10
+    # st = 'output/single/str_st'
+    # ed = 'output/single/str_ed'
+    # data = 'data/sutoreeji47585'
+    # out = 'output/str'
+    # rev = False
+    # cd_thr = -10
+    # dbs_eps = 0.004
+
+    ################## ArtGS ##################
+    K = 3
+    st = 'output/artgs/oven_st'
+    ed = 'output/artgs/oven_ed'
+    data = 'data/artgs/oven_101908'
+    out = 'output/artgs/oven'
+    rev = False
+
+    K = 3
+    st = 'output/artgs/tbl3_st'
+    ed = 'output/artgs/tbl3_ed'
+    data = 'data/artgs/table_25493'
+    out = 'output/artgs/tbl3'
+    rev = True
+
+    # K = 3
     # st = 'output/artgs/sto3_st'
     # ed = 'output/artgs/sto3_ed'
     # data = 'data/artgs/storage_45503'
@@ -252,48 +288,53 @@ if __name__ == '__main__':
     # rev = True
 
     ################## Ours ##################
-    K = 4
-    st = 'output/tbr4_st'
-    ed = 'output/tbr4_ed'
-    data = 'data/teeburu34178'
-    out = 'output/tbr4'
-    rev = False
-
-    # K = 5
-    # st = 'output/tbr5_st'
-    # ed = 'output/tbr5_ed'
-    # data = 'data/teeburu34610'
-    # out = 'output/tbr5'
-    # rev = False
-
-    # st = 'output/ob5_st'
-    # ed = 'output/ob5_ed'
-    # data = 'data/oobun7201'
-    # out = 'output/ob5'
+    # K = 4
+    # st = 'output/single/tbr4_st'
+    # ed = 'output/single/tbr4_ed'
+    # data = 'data/teeburu34178'
+    # out = 'output/tbr4'
     # rev = False
 
     # K = 6
-    # st = 'output/sut_st'
-    # ed = 'output/sut_ed'
+    # st = 'output/single/sut_st'
+    # ed = 'output/single/sut_ed'
     # data = 'data/sutoreeji40417'
     # out = 'output/sut'
     # rev = False
 
-    # K = 7
-    # st = 'output/nf_st'
-    # ed = 'output/nf_ed'
-    # data = 'data/naifu2'
-    # out = 'output/nf'
+    ################## Ours extra ##################
+    # K = 2
+    # st = 'output/single/mado_st'
+    # ed = 'output/single/mado_ed'
+    # data = 'data/uindou103238'
+    # out = 'output/mado'
     # rev = False
-    # cd_thr = -6
 
-    get_gt_motion_params(data, reverse=rev)
+    # K = 4
+    # st = 'output/single/tee_st'
+    # ed = 'output/single/tee_ed'
+    # data = 'data/teeburu23372'
+    # out = 'output/tee'
+    # rev = False
+
+    # K = 4
+    # st = 'output/single/sto4_st'
+    # ed = 'output/single/sto4_ed'
+    # data = 'data/sutoreeji45759'
+    # out = 'output/sto4'
+    # rev = False
+
+    ################## END ##################
 
     # train_single_demo(st, os.path.join(data, 'start'))
     # train_single_demo(ed, os.path.join(data, 'end'))
+    # exit(0)
 
     # cluster_demo(out, data, K, thr=cd_thr)
     # init_demo_from_dbscan(out, st, ed, K)
+    # exit(0)
+
+    get_gt_motion_params(data, reverse=rev)
 
     gmm_am_optim_demo(out, st, ed, data, num_movable=K)
     # mp_joint_optimization_demo(out, st, data, num_movable=K)

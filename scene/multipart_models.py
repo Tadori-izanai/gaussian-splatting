@@ -12,6 +12,9 @@ import numpy as np
 from pytorch3d.loss import chamfer_distance
 from pytorch3d.ops import knn_points
 
+os.environ['USE_KEOPS'] = '1'
+from geomloss import SamplesLoss
+
 from typing_extensions import override
 
 from gaussian_renderer import render
@@ -21,7 +24,7 @@ from scene import BWScenes
 from scene.dataset_readers import fetchPly, storePly
 from utils.general_utils import quat_mult, mat2quat, inverse_sigmoid, inverse_softmax, \
     strip_symmetric, build_scaling_rotation, eval_quad, decompose_covariance_matrix, build_rotation, \
-    find_close, find_files_with_suffix
+    find_close, find_files_with_suffix, kl_divergence_gaussian
 from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd, \
     eval_knn_opacities_collision_loss, eval_opacity_bce_loss, eval_depth_loss, sample_pts
 from utils.system_utils import mkdir_p
@@ -63,10 +66,6 @@ class MPArtModelBasic:
         self.opt.lambda_dssim = 0.2
         self.opt.column_lr = 0.005
         self.opt.t_lr = 0.00005
-
-        self.opt.cd_weight = 1
-        self.opt.cd_from_iter = 0
-        self.opt.cd_until_iter = self.opt.iterations
 
     def __init__(self, gaussians: GaussianModel, num_movable: int):
         self.num_movable = num_movable
@@ -171,12 +170,13 @@ class GMMArtModel(MPArtModelBasic):
         # self.opt.iterations = 10000
         self.opt.iterations = 15000
         self.opt.warmup_until_iter = 1000
-        self.opt.cd_from_iter = self.opt.warmup_until_iter + 1
-        self.opt.cd_until_iter = 7000
-        # self.opt.cd_until_iter = 5000
 
-        self.opt.sgd_interval = 1
-        # self.opt.sgd_interval = 4
+        self.opt.cd_from_iter = 1
+        self.opt.cd_until_iter = 7000
+        self.opt.cd_from_weight = 0
+        self.opt.cd_until_weight = 0.5
+
+        self.opt.sgd_interval = 2
 
         # self.opt.column_lr = 0.005
         self.opt.column_lr = 0.001
@@ -186,23 +186,28 @@ class GMMArtModel(MPArtModelBasic):
         self.opt.scaling_lr = 0.005
         self.opt.opacity_lr = 0.05
 
-        # self.opt.depth_scaling = 1000
-        self.opt.depth_scaling = 100
-        # self.opt.depth_scaling = 1
+        # self.opt.depth_scaling = 100
+        self.opt.depth_scaling = 1
 
         self.opt.depth_weight = None
         self.opt.cd_weight = None
         self.opt.center_weight = None
         self.opt.ppp_weight = None
         self.opt.cr_weight = None
+        self.opt.ppp_weight_ed = None
+        self.opt.kl_weight = None
+        self.opt.sd_weight = None
+
         self.opt.depth_weight = 1.0
-        # self.opt.cd_weight = 1.0
+        self.opt.cd_weight = 1.0
         self.opt.center_weight = 0.1
         self.opt.ppp_weight = 0.1
+        # self.opt.ppp_weight_ed = 0.1
+        # self.opt.kl_weight = 1e-5
+        # self.opt.sd_weight = 1.0
 
         self.opt.mask_thresh = .85
         self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
-        # self.opt.trace_r_thresh = 1 + 2 * math.cos(10 / 180 * math.pi)
 
     def __init__(self, gaussians: GaussianModel, num_movable: int, new_scheme=True):
         super().__init__(gaussians, num_movable)
@@ -252,6 +257,10 @@ class GMMArtModel(MPArtModelBasic):
         self.pcds_sample = []
         self.pcds_deformed = []
         self.pcd_knn_indices = []
+
+        self.ed_knn_indices = []
+
+        self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05)
 
         self.new_scheme = new_scheme
         self.gaussians.duplicate(2 if new_scheme else self.num_movable + 1)
@@ -356,6 +365,7 @@ class GMMArtModel(MPArtModelBasic):
         xyz_ed = np.asarray(fetchPly(os.path.join(source_path, 'points3d-100k.ply')).points)
         xyz_st = np.asarray(fetchPly(os.path.join(source_path, '../start/points3d.ply')).points)
         y = torch.tensor(xyz_st, device='cuda').unsqueeze(0)
+        y = sample_pts(y, 10_100_000)
         x = torch.tensor(xyz_ed, device='cuda').unsqueeze(0)
         cd = chamfer_distance(x, y, batch_reduction=None, point_reduction=None, single_directional=True)[0][0]
         cd /= torch.max(cd)
@@ -370,6 +380,7 @@ class GMMArtModel(MPArtModelBasic):
             ply_file = os.path.join(cluster_dir, f'points3d_{i}.ply')
             if os.path.exists(ply_file):
                 pcd = torch.tensor(np.asarray(fetchPly(ply_file).points), device='cuda')
+                pcd = sample_pts(pcd, len(pcd) * 100_000 // len(xyz_st))
                 self.pcds.append(pcd)
                 self.pcds_deformed.append(pcd)
                 self.pcds_sample.append(sample_pts(pcd, len(pcd) // 10))
@@ -527,9 +538,14 @@ class GMMArtModel(MPArtModelBasic):
         for c in self._c:
             c.requires_grad_(False)
 
-        for v1, v2 in zip(self._column_vec1, self._column_vec2):
-            v1.requires_grad_(False)
-            v2.requires_grad_(False)
+        # k = 0
+        # for v1, v2 in zip(self._column_vec1, self._column_vec2):
+        #     if k == 2:
+        #         k += 1
+        #         continue
+        #     v1.requires_grad_(False)
+        #     v2.requires_grad_(False)
+        #     k += 1
 
     def _show_losses(self, iteration: int, losses: dict):
         if iteration == self.opt.warmup_until_iter:
@@ -542,7 +558,7 @@ class GMMArtModel(MPArtModelBasic):
                 prune=False
             )
 
-        if iteration not in [1, 20, 50, 200, 500, 1000, 2000, 5000, 7000, 9000, 12000, 15000, self.opt.iterations]:
+        if iteration not in [1, 50, 500, 1001, 2000, 5000, 7000, 9000, 12000, 15000, self.opt.iterations]:
             return
         loss_msg = f"\niteration {iteration}:"
         for name, loss in losses.items():
@@ -553,9 +569,10 @@ class GMMArtModel(MPArtModelBasic):
             print(f't{k}:', self.get_t[k].detach().cpu().numpy())
             print(f'r{k}:', self.get_r[k].detach().cpu().numpy())
             print(f'_c{k}, _t{k}:', self._c[k].detach().cpu().numpy(), self._t[k].detach().cpu().numpy())
+        print(self.opt.cd_weight)
         print()
 
-    def _eval_losses(self, render_pkg, viewpoint_cam, gaussians, gt_gaussians=None, requires_cd=False):
+    def _eval_losses(self, render_pkg, viewpoint_cam, gaussians, gt_gaussians=None, requires_cd=False, i=None):
         gt_image = viewpoint_cam.original_image.cuda()
         losses = {
             'im': eval_img_loss(render_pkg['render'], gt_image, self.opt),
@@ -563,74 +580,170 @@ class GMMArtModel(MPArtModelBasic):
             'd': None,
             'center': None,
             'ppp': None,
+            'ppped': None,
+            'kl': None,
+            'sd': None,
         }
         loss = losses['im']
+        if (self.opt.sd_weight is not None) and (gt_gaussians is not None) and requires_cd:
+            mp_indices = self.pred_mp()
+            pc_lst = []
+            num = gaussians.size() // (1 + self.num_movable)
+            pc_lst += [
+                gaussians.get_xyz[num * (k + 1) : num * (k + 2)][
+                    (self.get_prob > self.opt.mask_thresh) & (mp_indices == k)
+                ] for k in np.arange(self.num_movable)
+            ]
+            pc_lst.append(gaussians.get_xyz[:num][self.get_prob < (1 - self.opt.mask_thresh)])
+            x = sample_pts(torch.cat(pc_lst, dim=0), 5000)
+            y = sample_pts(gt_gaussians.get_xyz, 5000)
+            losses['sd'] = self.loss_fn(x.unsqueeze(0), y.unsqueeze(0))[0]
+            loss += self.opt.sd_weight * losses['sd']
+
+            # pcd_deformed = torch.cat(self.pcds_deformed, dim=0)
+            # pred = sample_pts(pcd_deformed, 5000)
+            # gt = sample_pts(self.pcd_gt, -1)
+            # # losses['sd'] = self.loss_fn(pred.unsqueeze(0), gt.unsqueeze(0))[0]
+            # losses['sd'] = self.loss_fn(gt.unsqueeze(0), pred.unsqueeze(0))[0]
+            # loss += self.opt.sd_weight * losses['sd']
+
+            # st_movable_mask = self.get_prob > self.opt.mask_thresh
+            # ed_movable_mask = ~(~st_movable_mask)[self.ed_knn_indices]
+            # mp_indices = self.pred_mp()
+            # num = gaussians.size() // (1 + self.num_movable)
+            # pc_lst = []
+            # pc_lst += [
+            #     gaussians.get_xyz[num * (k + 1) : num * (k + 2)][st_movable_mask & (mp_indices == k)]
+            #     for k in np.arange(self.num_movable)
+            # ]
+            # x = sample_pts(torch.cat(pc_lst, dim=0), 5000)
+            # y = sample_pts(gt_gaussians.get_xyz[ed_movable_mask], 5000)
+            # losses['sd'] = self.loss_fn(x.unsqueeze(0), y.unsqueeze(0))[0]
+            # loss += self.opt.sd_weight * losses['sd']
+            # if i == 2000:
+            #     gt_gaussians[ed_movable_mask].save_ply(
+            #         os.path.join(self.dataset.model_path, f'point_cloud/iteration_{-2}/point_cloud.ply'),
+            #     )
+
         if (self.opt.cd_weight is not None) and (gt_gaussians is not None) and requires_cd:
             # mp_indices = self.pred_mp()
-            # definite_gaussians = GaussianModel(0)
             # pc_lst = []
-            # if self.new_scheme:
-            #     num = gaussians.size() // 2
-            #     pc_lst.append(gaussians.get_xyz[num:][self.get_prob > self.opt.mask_thresh])
-            # else:
-            #     num = gaussians.size() // (1 + self.num_movable)
-            #     pc_lst += [
-            #         gaussians.get_xyz[num * (k + 1) : num * (k + 2)][
-            #             (self.get_prob > self.opt.mask_thresh) & (mp_indices == k)
-            #         ] for k in np.arange(self.num_movable)
-            #     ]
+            # num = gaussians.size() // (1 + self.num_movable)
+            # pc_lst += [
+            #     gaussians.get_xyz[num * (k + 1) : num * (k + 2)][
+            #         (self.get_prob > self.opt.mask_thresh) & (mp_indices == k)
+            #     ] for k in np.arange(self.num_movable)
+            # ]
             # pc_lst.append(gaussians.get_xyz[:num][self.get_prob < (1 - self.opt.mask_thresh)])
-            # definite_gaussians.get_xyz = torch.cat(pc_lst, dim=0)
-            # losses['cd'] = eval_cd_loss_sd(definite_gaussians, gt_gaussians)
+            # x = sample_pts(torch.cat(pc_lst, dim=0), 5000)
+            # y = sample_pts(gt_gaussians.get_xyz, 5000)
+            # dist1, _ = chamfer_distance(x.unsqueeze(0), y.unsqueeze(0), batch_reduction=None)
+            # # dist2, _ = chamfer_distance(y.unsqueeze(0), x.unsqueeze(0), batch_reduction=None)
+            # # losses['cd'] = (dist1[0] + dist2[0]) * 0.5
+            # losses['cd'] = dist1[0]
+            # loss += self.opt.cd_weight * losses['cd']
+
             pcd_deformed = torch.cat(self.pcds_deformed, dim=0)
             x = sample_pts(pcd_deformed, 5000)
             y = sample_pts(self.pcd_gt, -1)
             dist, _ = chamfer_distance(x.unsqueeze(0), y.unsqueeze(0), batch_reduction=None)
             losses['cd'] = dist[0]
             loss += self.opt.cd_weight * losses['cd']
+
+            # st_movable_mask = self.get_prob > self.opt.mask_thresh
+            # ed_movable_mask = ~(~st_movable_mask)[self.ed_knn_indices]
+            # mp_indices = self.pred_mp()
+            # num = gaussians.size() // (1 + self.num_movable)
+            # pc_lst = []
+            # pc_lst += [
+            #     gaussians.get_xyz[num * (k + 1) : num * (k + 2)][st_movable_mask & (mp_indices == k)]
+            #     for k in np.arange(self.num_movable)
+            # ]
+            # x = sample_pts(torch.cat(pc_lst, dim=0), 5000)
+            # y = sample_pts(gt_gaussians.get_xyz[ed_movable_mask], 5000)
+            # # dist, _ = chamfer_distance(x.unsqueeze(0), y.unsqueeze(0), batch_reduction=None)
+            # dist, _ = chamfer_distance(y.unsqueeze(0), x.unsqueeze(0), batch_reduction=None)
+            # losses['cd'] = dist[0]
+            # loss += self.opt.cd_weight * losses['cd']
+            # if i == 2000:
+            #     gt_gaussians[ed_movable_mask].save_ply(
+            #         os.path.join(self.dataset.model_path, f'point_cloud/iteration_{-2}/point_cloud.ply'),
+            #     )
+
         if (self.opt.depth_weight is not None) and (viewpoint_cam.image_depth is not None):
             gt_depth = viewpoint_cam.image_depth.cuda()
             losses['d'] = eval_depth_loss(render_pkg['depth'], gt_depth, scaling=self.opt.depth_scaling)
             loss += self.opt.depth_weight * losses['d']
+
         if self.opt.center_weight is not None and self.num_movable > 1:
             mask = self.get_ppp() * self.get_prob.unsqueeze(-1) # [N, K]
             c = torch.einsum('nk,nj->kj', mask, self.original_xyz.to(dtype=mask.dtype))  # [K, 3]
             c /= mask.sum(dim=0).unsqueeze(-1)
             losses['center'] = nn.functional.mse_loss(self.get_mu, c)
             loss += self.opt.center_weight * losses['center']
+
         if self.opt.ppp_weight is not None and self.num_movable > 1:
             losses['ppp'] = 0
-            # for k in range(self.num_movable):
-            #     losses['ppp'] += self.get_ppp(
-            #         pts=torch.cat([self.pcds_sample[i] for i in range(self.num_movable) if i != k], dim=0)
-            #     )[:, k].mean()
-            #     losses['ppp'] += self.get_ppp(
-            #         pts=torch.cat(
-            #             [
-            #                 torch.matmul(self.pcds_sample[i], self.get_r[i]) + self.get_t[i]
-            #                 for i in range(self.num_movable) if i != k
-            #             ], dim=0
-            #         ), deformed=True
-            #     )[:, k].mean()
             for k in range(self.num_movable):
                 losses['ppp'] += torch.cat(
                     [self.get_ppp()[self.pcd_knn_indices[i]] for i in range(self.num_movable) if i != k], dim=0
                 )[:, k].mean()
             loss += self.opt.ppp_weight * losses['ppp'] / self.num_movable
+
+        if self.opt.ppp_weight_ed is not None and self.num_movable > 1 and requires_cd:
+            losses['ppped'] = 0
+            for k in range(self.num_movable):
+                losses['ppped'] += self.get_ppp(
+                    pts=torch.cat(
+                        [
+                            torch.matmul(self.pcds_sample[i], self.get_r[i]) + self.get_t[i]
+                            for i in range(self.num_movable) if i != k
+                        ], dim=0
+                    ), deformed=True
+                )[:, k].mean()
+            loss += self.opt.ppp_weight_ed * losses['ppped'] / self.num_movable
+
+        if self.opt.kl_weight is not None and self.num_movable > 1 and requires_cd:
+            r = torch.stack(self.get_r).to(dtype=self.get_mu.dtype)
+            t = torch.stack(self.get_t).to(dtype=self.get_mu.dtype)
+            rot = r.transpose(1, 2) @ self.get_rotation
+            ss = torch.diag_embed(self.get_scaling)
+            sigma = rot @ ss @ ss @ rot.transpose(1, 2)
+            mu = torch.einsum('kji,kj->ki', r, self.get_mu) + t
+            losses['kl'] = 0
+            for a, m in zip(mu, sigma):
+                for aa, mm in zip(mu, sigma):
+                    losses['kl'] += kl_divergence_gaussian(a, m, aa, mm)
+            losses['kl'] /= self.num_movable
+            loss += self.opt.kl_weight * losses['kl']
+
         return loss, losses
 
+    def _set_ed_knn_indices(self, gt_gaussians: GaussianModel):
+        p1 = gt_gaussians.get_xyz.detach().unsqueeze(0)
+        p2 = self.original_xyz.detach().unsqueeze(0)
+        _, indices, _ = knn_points(p1, p2, K=1)
+        self.ed_knn_indices = indices.flatten()
+
     @override
-    def train(self, gt_gaussians=None):
+    def train(self, gt_gaussians):
         _ = prepare_output_and_logger(self.dataset)
         iterations = self.opt.iterations
         bws = BWScenes(self.dataset, self.gaussians, is_new_gaussians=False)
         self.training_setup(self.opt)
         # self.joint_pred()
+        self._set_ed_knn_indices(gt_gaussians)
 
         progress_bar = tqdm(range(iterations), desc="Training progress")
         ema_loss_for_log = 0.0
         for i in range(1, iterations + 1):
             requires_cd = self.opt.cd_from_iter <= i <= self.opt.cd_until_iter
+            if self.opt.cd_weight is not None:
+                self.opt.cd_weight = self.cosine_anneal(
+                    i, final_step=self.opt.cd_until_iter, start_step=self.opt.cd_from_iter,
+                    start_value=self.opt.cd_from_weight, final_value=self.opt.cd_until_weight
+                )
+
             # self._p = self.cosine_anneal(i, start_step=0, final_step=self.opt.warmup_until_iter, start_value=1, final_value=2)
             # self._p = self.cosine_anneal(i, start_step=0, final_step=self.opt.iterations, start_value=1, final_value=2)
             self.deform(i)
@@ -639,7 +752,7 @@ class GMMArtModel(MPArtModelBasic):
             viewpoint_cam, background = bws.pop_black() if (i % 2 == 0) else bws.pop_white()
             render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, background)
             # render_pkg = render(viewpoint_cam, self.gaussians[self.gaussians.get_opacity.squeeze(-1) > 0.005], self.pipe, background)
-            loss, losses = self._eval_losses(render_pkg, viewpoint_cam, self.gaussians, gt_gaussians, requires_cd=requires_cd)
+            loss, losses = self._eval_losses(render_pkg, viewpoint_cam, self.gaussians, gt_gaussians, requires_cd=requires_cd, i=i)
             loss.backward()
 
             with torch.no_grad():

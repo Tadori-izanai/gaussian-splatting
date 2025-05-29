@@ -245,6 +245,23 @@ def mat2quat_batch(m):
     # 返回四元数 [w, x, y, z]
     return torch.stack([w, x, y, z], dim=1)
 
+def kl_divergence_gaussian(mu0, sigma0, mu1, sigma1):
+    """
+    Compute KL divergence between two multivariate normal distributions:
+    P = N(mu0, sigma0)
+    Q = N(mu1, sigma1)
+    """
+    k = mu0.shape[0]
+    sigma1_inv = torch.linalg.inv(sigma1)
+    diff = mu1 - mu0
+
+    trace_term = torch.trace(sigma1_inv @ sigma0)
+    diff_term = diff @ sigma1_inv @ diff
+    log_det_term = torch.logdet(sigma1) - torch.logdet(sigma0)
+
+    kl = 0.5 * (log_det_term - k + trace_term + diff_term)
+    return kl
+
 def otsu_with_peak_filtering(data, std_multiplier=3, bins=256, bias_factor=1.25):
     """
     使用主峰截取后再应用 Otsu 方法计算阈值。

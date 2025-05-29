@@ -196,8 +196,8 @@ def get_gaussian_surface_pcd(model_path: str, it: int, n_samples: int=10_000) ->
     def from_pgsr_mesh():
         return sample_points_from_ply(os.path.join(model_path, f'mesh/tsdf_fusion_{it}.ply'), n_samples)
 
-    # return from_gaussian_xyz()
-    return from_pgsr_mesh()
+    return from_gaussian_xyz()
+    # return from_pgsr_mesh()
 
 def get_pred_point_cloud(model_path: str, iters=30, K=1, n_samples: int=100_000) -> dict:
     static = get_gaussian_surface_pcd(model_path, iters, n_samples)
@@ -218,10 +218,15 @@ def get_gt_point_clouds(gt_dir: str, K=1, n_samples: int=100_000, reverse=True) 
         movable = sample_points_from_ply(os.path.join(gt_dir, f'{state}/{state}_dynamic_rotate.ply'), n_samples)
         movables.append(movable)
     else:
+        j = 0
         for i in range(K):
-            movables.append(
-                sample_points_from_ply(os.path.join(gt_dir, f'{state}/{state}_dynamic_{i}_rotate.ply'), n_samples)
-            )
+            ply_file = os.path.join(gt_dir, f'{state}/{state}_dynamic_{j}_rotate.ply')
+            while not os.path.exists(ply_file):
+                j += 1
+                ply_file = os.path.join(gt_dir, f'{state}/{state}_dynamic_{j}_rotate.ply')
+                assert j < 99
+            j += 1
+            movables.append(sample_points_from_ply(ply_file, n_samples))
         movable = np.concatenate(movables, axis=0)
     return {'movables': movables, 'movable': movable, 'static': static, 'whole': whole}
 
