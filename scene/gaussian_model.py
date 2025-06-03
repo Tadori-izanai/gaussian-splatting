@@ -210,6 +210,16 @@ class GaussianModel:
         gaussians._opacity = self._opacity[mask]
         return gaussians
 
+    def __add__(self, other):
+        gaussians = GaussianModel(self.max_sh_degree)
+        gaussians._xyz = torch.cat((self._xyz, other._xyz), dim=0)
+        gaussians._features_dc = torch.cat((self._features_dc, other._features_dc), dim=0)
+        gaussians._features_rest = torch.cat((self._features_rest, other._features_rest), dim=0)
+        gaussians._scaling = torch.cat((self._scaling, other._scaling), dim=0)
+        gaussians._rotation = torch.cat((self._rotation, other._rotation), dim=0)
+        gaussians._opacity = torch.cat((self._opacity, other._opacity), dim=0)
+        return gaussians
+
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
