@@ -50,7 +50,9 @@ if __name__ == '__main__':
     # data = '../data/uindou103238'
     # data = '../data/sutoreeji47585'
     # data = '../data/teeburu23372'
-    data = '../data/sutoreeji45759'
+    # data = '../data/sutoreeji45759'
+    # data = '../data/sutoreeji48063'
+    data = '../data/teeburu33116'
 
     convert_to_nerf(data)
 

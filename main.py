@@ -18,14 +18,14 @@ from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
 
 from arguments import get_default_args
-from utils.general_utils import eval_quad, inverse_sigmoid
-from scene.multipart_models import MPArtModelJoint, GMMArtModel
+from utils.general_utils import eval_quad, inverse_sigmoid, value_to_rgb
+from scene.multipart_models import MPArtModelJoint, GMMArtModel, COLORS
 from scene.deformable_model import DeformationModel, DMCanonical, DMGauFRe
 from scene.dataset_readers import fetchPly, storePly
 
 from main_utils import train_single, get_gaussians, print_motion_params, plot_hist, \
     mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, eval_init_gmm_params, \
-    modify_scaling, get_vis_mask, value_to_rgb, estimate_se3, eval_mu_sigma
+    modify_scaling, get_vis_mask, estimate_se3, eval_mu_sigma, save_axis_mesh
 from metric_utils import get_gt_motion_params, interpret_transforms, eval_axis_metrics, \
     get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics
 
@@ -120,13 +120,11 @@ def gmm_am_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str,
     gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
     gaussians_ed = get_gaussians(ed_path, from_chk=True).cancel_grads()
 
-    # am = GMMArtModel(gaussians_st, num_movable)
     am = GMMArtModel(gaussians_st, num_movable, new_scheme=False)
     am.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path, thr=cd_thr)
-    # am.set_init_params(out_path, scaling_modifier=10)
     am.set_init_params(out_path, scaling_modifier=1)
-    am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_9/point_cloud.ply'))
-    # return
+    # am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_9/point_cloud.ply'))
+    am.save_all_vis(-10)
     t, r = am.train(gt_gaussians=gaussians_ed)
 
     ppp = am.get_ppp().detach().cpu().numpy()
@@ -135,8 +133,8 @@ def gmm_am_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str,
     mask = (mpp > thr)
 
     gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
-    # gaussians_st[part_indices == 0].save_ply(os.path.join(out_path, 'point_cloud/iteration_19/point_cloud.ply'))
-    am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_19/point_cloud.ply'))
+    # am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_19/point_cloud.ply'))
+    am.save_all_vis(-20)
     for i in range(num_movable):
         gaussians_st[mask & (part_indices == i)].save_ply(
             os.path.join(out_path, f'point_cloud/iteration_{21 + i}/point_cloud.ply')
@@ -146,6 +144,29 @@ def gmm_am_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str,
     np.save(os.path.join(out_path, 't_pre.npy'), [tt.detach().cpu().numpy() for tt in t])
     np.save(os.path.join(out_path, 'mask_pre.npy'), mask)
     np.save(os.path.join(out_path, 'part_indices_pre'), part_indices)
+
+def vis_axes_pp_demo(out_path: str, st_path: str):
+    ply_path = os.path.join(out_path, 'ply')
+    os.makedirs(ply_path, exist_ok=True)
+    # axes
+    with open(os.path.join(out_path, 'trans_pred.json'), 'r') as json_file:
+        trans = json.load(json_file)
+    mu = np.load(os.path.join(out_path, 'mu_init.npy'))
+    for i, trans_info in enumerate(trans):
+        o = np.array(trans_info['axis']['o'])
+        d = np.array(trans_info['axis']['d'])
+        save_axis_mesh(d, o, os.path.join(ply_path, f'axis_{i}.ply'), mu[i])
+
+    # pcd seg
+    num_movable = len(mu)
+    mask = np.load(os.path.join(out_path, 'mask_pre.npy'))
+    part_indices = np.load(os.path.join(out_path, 'part_indices_pre.npy'))
+    gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
+    xyz = gaussians_st.get_xyz.detach().cpu().numpy()
+    rgb = np.full(xyz.shape, 255)
+    for k in np.arange(num_movable):
+        rgb[(part_indices == k) & mask] = np.array(COLORS[k % len(COLORS)]) * 255
+    storePly(os.path.join(ply_path, 'seg.ply'), xyz, rgb)
 
 def mp_joint_optimization_demo(out_path: str, st_path: str, data_path: str, num_movable: int):
     torch.autograd.set_detect_anomaly(False)
@@ -310,12 +331,12 @@ if __name__ == '__main__':
     # out = 'output/mado'
     # rev = False
 
-    # K = 4
-    # st = 'output/single/tee_st'
-    # ed = 'output/single/tee_ed'
-    # data = 'data/teeburu23372'
-    # out = 'output/tee'
-    # rev = False
+    K = 4
+    st = 'output/single/tee_st'
+    ed = 'output/single/tee_ed'
+    data = 'data/teeburu23372'
+    out = 'output/tee'
+    rev = False
 
     # K = 4
     # st = 'output/single/sto4_st'
@@ -323,6 +344,21 @@ if __name__ == '__main__':
     # data = 'data/sutoreeji45759'
     # out = 'output/sto4'
     # rev = False
+
+    # K = 3
+    # st = 'output/single/st3_st'
+    # ed = 'output/single/st3_ed'
+    # data = 'data/sutoreeji48063'
+    # out = 'output/st3'
+    # rev = False
+
+    K = 3
+    st = 'output/single/te3_st'
+    ed = 'output/single/te3_ed'
+    data = 'data/teeburu33116'
+    out = 'output/te3'
+    rev = False
+
 
     ################## END ##################
 
@@ -339,5 +375,6 @@ if __name__ == '__main__':
     gmm_am_optim_demo(out, st, ed, data, num_movable=K)
     # mp_joint_optimization_demo(out, st, data, num_movable=K)
     eval_demo(out, data, num_movable=K, reverse=rev)
+    vis_axes_pp_demo(out, st)
 
     pass

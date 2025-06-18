@@ -206,7 +206,7 @@ def get_pred_point_cloud(model_path: str, iters=30, K=1, n_samples: int=100_000)
         movables.append(get_gaussian_surface_pcd(model_path, iters + i, n_samples))
     movable = np.concatenate(movables, axis=0)
     whole = get_gaussian_surface_pcd(model_path, 99999, n_samples)
-    # whole = get_gaussian_surface_pcd(model_path, 9, n_samples)
+    # whole = get_gaussian_surface_pcd(model_path, 15000, n_samples)
     return {'movables': movables, 'movable': movable, 'static': static, 'whole': whole}
 
 def get_gt_point_clouds(gt_dir: str, K=1, n_samples: int=100_000, reverse=True) -> dict:

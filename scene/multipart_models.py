@@ -24,7 +24,7 @@ from scene import BWScenes
 from scene.dataset_readers import fetchPly, storePly
 from utils.general_utils import quat_mult, mat2quat, inverse_sigmoid, inverse_softmax, \
     strip_symmetric, build_scaling_rotation, eval_quad, decompose_covariance_matrix, build_rotation, \
-    find_close, find_files_with_suffix, kl_divergence_gaussian
+    find_close, find_files_with_suffix, kl_divergence_gaussian, value_to_rgb
 from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd, \
     eval_knn_opacities_collision_loss, eval_opacity_bce_loss, eval_depth_loss, sample_pts
 from utils.system_utils import mkdir_p
@@ -512,6 +512,29 @@ class GMMArtModel(MPArtModelBasic):
             fused_color += ppp[:, k].unsqueeze(1).cpu() * c
 
         self.original_gaussians.save_vis(path, fused_color)
+
+    def save_mpp_vis(self, path: str):
+        mkdir_p(os.path.dirname(path))
+        mpp = self.get_prob
+        fused_color = value_to_rgb(mpp)
+        self.original_gaussians.save_vis(path, fused_color)
+
+    def save_pp_vis(self, path: str):
+        mkdir_p(os.path.dirname(path))
+        ppp = self.get_ppp()
+        mpp = self.get_prob
+        fused_color = torch.zeros(self.original_gaussians.size(), 3)
+        for k in range(self.num_movable):
+            c = torch.tensor(COLORS[k % len(COLORS)])
+            fused_color += ppp[:, k].unsqueeze(1).cpu() * c
+        fused_color[mpp < self.opt.mask_thresh] = 0
+        self.original_gaussians.save_vis(path, fused_color)
+
+    def save_all_vis(self, iteration=-20):
+        pcd_dir = self.dataset.model_path
+        self.save_mpp_vis(os.path.join(pcd_dir, f'point_cloud/iteration_{iteration + 2}/point_cloud.ply'))
+        self.save_ppp_vis(os.path.join(pcd_dir, f'point_cloud/iteration_{iteration + 1}/point_cloud.ply'))
+        self.save_pp_vis(os.path.join(pcd_dir, f'point_cloud/iteration_{iteration}/point_cloud.ply'))
 
     @override
     def training_setup(self, training_args):

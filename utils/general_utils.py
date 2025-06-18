@@ -18,6 +18,7 @@ import random
 from scipy.spatial import KDTree
 from scipy.stats import gaussian_kde
 from plyfile import PlyData
+import matplotlib.pyplot as plt
 
 from pytorch3d.loss import chamfer_distance
 from pytorch3d.io import load_ply, load_obj
@@ -244,6 +245,22 @@ def mat2quat_batch(m):
 
     # 返回四元数 [w, x, y, z]
     return torch.stack([w, x, y, z], dim=1)
+
+def value_to_rgb(values, cmap_name='viridis'):
+    """
+    将 0~1 之间的值映射到 RGB 颜色。
+
+    参数:
+    values: (N,) 形状的 Tensor，值范围在 [0,1]。
+    cmap_name: 字符串，可选，Matplotlib 的 colormap 名称。
+
+    返回:
+    (N, 3) 形状的 Tensor，RGB 颜色值范围在 [0,1]。
+    """
+    cmap = plt.get_cmap(cmap_name)
+    values = values.detach().cpu().numpy()  # 转换为 NumPy 以使用 Matplotlib
+    colors = cmap(values)[:, :3]   # 获取 RGB 值（忽略 alpha 通道）
+    return torch.tensor(colors, dtype=torch.float32)
 
 def kl_divergence_gaussian(mu0, sigma0, mu1, sigma1):
     """

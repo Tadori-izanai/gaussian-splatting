@@ -24,7 +24,7 @@ import numpy as np
 from train import prepare_output_and_logger
 from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses
-from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid
+from utils.general_utils import otsu_with_peak_filtering, inverse_sigmoid, value_to_rgb
 from scene.articulation_model import ArticulationModelBasic, ArticulationModelJoint
 from scene.art_models import ArticulationModel
 from scene.multipart_misc import OptimOMP, MPArtModelII
@@ -33,6 +33,8 @@ from scene.deformable_model import DMCanonical, DMGauFRe, DeformationModel
 from metric_utils import get_gt_motion_params
 
 from main_utils import *
+
+from main import cd_thr
 
 def train(dataset, opt, pipe, gaussians=None, gt_gaussians=None, prev_iters=0):
     _ = prepare_output_and_logger(dataset)

@@ -7,6 +7,7 @@ pip install plyfile
 pip install scipy
 pip install opencv-python einops kornia yacs
 pip install pykeops geomloss
+pip install open3d
 pip install submodules/diff-gaussian-rasterization
 pip install submodules/simple-knn
 pip install "git+https://github.com/facebookresearch/pytorch3d.git"

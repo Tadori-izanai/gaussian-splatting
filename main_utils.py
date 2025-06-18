@@ -6,6 +6,7 @@ from tqdm import tqdm
 from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
+import open3d as o3d
 
 import json
 import numpy as np
@@ -245,22 +246,6 @@ def get_vis_mask(gaussians: GaussianModel, data_path: str, eps: float=0.01) -> t
     xyz = gaussians.get_xyz.detach().cpu().numpy()
     return torch.tensor(eval_visibility(xyz, data_path, eps), device=gaussians.get_xyz.device)
 
-def value_to_rgb(values, cmap_name='viridis'):
-    """
-    将 0~1 之间的值映射到 RGB 颜色。
-
-    参数:
-    values: (N,) 形状的 Tensor，值范围在 [0,1]。
-    cmap_name: 字符串，可选，Matplotlib 的 colormap 名称。
-
-    返回:
-    (N, 3) 形状的 Tensor，RGB 颜色值范围在 [0,1]。
-    """
-    cmap = plt.get_cmap(cmap_name)
-    values = values.detach().cpu().numpy()  # 转换为 NumPy 以使用 Matplotlib
-    colors = cmap(values)[:, :3]   # 获取 RGB 值（忽略 alpha 通道）
-    return torch.tensor(colors, dtype=torch.float32)
-
 def estimate_se3(p: torch.tensor, p_prime: torch.tensor, k_neighbors=21):
     p = p.detach().cpu().numpy()
     p_prime = p_prime.detach().cpu().numpy()
@@ -292,6 +277,25 @@ def estimate_se3(p: torch.tensor, p_prime: torch.tensor, k_neighbors=21):
     p_neighbors = p[indices]  # (n_samples, k_neighbors, 3)
     p_prime_neighbors = p_prime[indices]
     return estimate_se3_batch(p_neighbors, p_prime_neighbors)  # R: (n_samples, 3, 3), t: (n_samples, 3)
+
+def save_axis_mesh(d: np.ndarray, o: np.ndarray, filepath: str, o_ref=None):
+    if o_ref is None:
+        o_ref = np.zeros(3)
+    if (np.abs(o) < 1e-6).all():  # prismatic
+        o = o_ref
+    else:
+        t = np.dot(o_ref - o, d) / np.dot(d, d)
+        o = o + t * d
+
+    axis = o3d.geometry.TriangleMesh.create_arrow(cylinder_radius=0.01, cone_radius=0.02, cylinder_height=0.7, cone_height=0.04)
+    arrow = np.array([0., 0., 1.], dtype=np.float32)
+    n = np.cross(arrow, d)
+    if np.linalg.norm(n) > 1e-4:
+        rad = np.arccos(np.dot(arrow, d))
+        r_arrow = rotation_matrix_from_axis_angle(n, rad)
+        axis.rotate(r_arrow, center=(0, 0, 0))
+    axis.translate(o[:3])
+    o3d.io.write_triangle_mesh(filepath, axis)
 
 if __name__ == '__main__':
     def init_demo_v2(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int):
