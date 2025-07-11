@@ -24,7 +24,9 @@ from pytorch3d.loss import chamfer_distance
 from pytorch3d.io import load_ply, load_obj
 from pytorch3d.ops import sample_points_from_meshes
 from pytorch3d.structures import Meshes
-
+from sklearn.decomposition import PCA
+import open3d as o3d
+import pyvista as pv
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -442,6 +444,125 @@ def sample_points_from_ply(file_path: str, n_samples: int=100_000) -> np.ndarray
     mesh = Meshes(verts=[verts], faces=[faces])
     pts = sample_points_from_meshes(mesh, num_samples=n_samples).squeeze(0)
     return pts.cpu().numpy()
+
+def pca_on_pointcloud(pointcloud):
+    """
+    Perform PCA on a point cloud to derive the three main directions.
+    """
+    # Center the point cloud by subtracting the mean
+    center = np.mean(pointcloud, axis=0)
+    centered_points = pointcloud - center
+
+    # Perform PCA
+    pca = PCA(n_components=3)
+    pca.fit(centered_points)
+
+    # Extract directions (principal components) and variances
+    directions = pca.components_.T  # Transpose to get (3, 3) with each row as a direction
+    stds = np.sqrt(pca.explained_variance_)
+    return center, directions, stds
+
+def calculate_obb_o3d(pointcloud: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Convert numpy array to open3d PointCloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pointcloud)
+
+    # Compute OBB
+    obb = pcd.get_oriented_bounding_box()
+
+    # Extract center
+    center = np.array(obb.get_center())
+
+    # Extract rotation matrix (directions) and ensure it's (3, 3)
+    R = obb.R  # Rotation matrix from Open3D OBB
+    directions = R.T  # Transpose to match convention where rows are directions
+
+    # Extract extents and sort in descending order
+    extents = np.array(obb.extent)
+    sort_indices = np.argsort(extents)[::-1]  # Sort indices in descending order
+    extents = extents[sort_indices]
+    directions = directions[sort_indices]
+    return center, directions, extents
+
+def calculate_obb_pv(pointcloud: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Calculate the Oriented Bounding Box (OBB) of a point cloud using PyVista.
+    """
+    # Create a PyVista PolyData from your point cloud
+    point_cloud = pv.PolyData(pointcloud)
+
+    # Get oriented bounding box with metadata
+    obb, corner, axes = point_cloud.oriented_bounding_box(return_meta=True)
+
+    # 'axes' is a 3x3 matrix where each row is a direction vector of an axis
+    directions = axes
+
+    # Compute extents by projecting points onto axes
+    proj = (pointcloud - corner) @ directions.T
+    extents = proj.max(axis=0) - proj.min(axis=0)
+
+    # Sort extents and directions by descending extents
+    sort_idx = np.argsort(extents)[::-1]
+    extents = extents[sort_idx]
+    directions = directions[sort_idx]
+
+    # Compute center as midpoint along each axis
+    center_proj = (proj.max(axis=0) + proj.min(axis=0)) / 2
+    center = corner + center_proj @ directions
+    return center, directions, extents
+
+
+def estimate_normals_o3d(points, radius_multiplier=3, max_nn=30):
+    """
+    Estimate normals for a point cloud.
+    """
+    # Create Open3D point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+
+    # Analyze density to find a suitable radius
+    # pcd_tree = o3d.geometry.KDTreeFlann(pcd)
+    # avg_dist_to_3rd_neighbor = 0
+    # num_points = len(pcd.points)
+    # for i in range(num_points):
+    #     [_, _, dists] = pcd_tree.search_knn_vector_3d(pcd.points[i], 4)
+    #     if len(dists) > 3:
+    #         avg_dist_to_3rd_neighbor += dists[3]
+    # avg_dist_to_3rd_neighbor /= num_points
+    # radius = avg_dist_to_3rd_neighbor * radius_multiplier
+
+    # Estimate normals
+    pcd.estimate_normals(
+        # search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=max_nn)
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.01, max_nn=30)
+    )
+
+    # Extract normals
+    normals = np.asarray(pcd.normals)
+    return normals
+
+
+def estimate_normals_pv(points, feature_angle=30.0, splitting=True):
+    """
+    Estimate normals using PyVista (VTK's implementation).
+
+    Args:
+        points: (N, 3) numpy array.
+        feature_angle: Angle to define sharp edges. Normals are not smoothed
+                       across edges sharper than this angle.
+        splitting: If True, splits vertices at sharp edges to produce crisp
+                   normals on each face.
+    """
+    # Create a PyVista PolyData object
+    poly_data = pv.PolyData(points)
+
+    # Compute normals
+    poly_data.compute_normals(
+        feature_angle=feature_angle,
+        splitting=splitting,
+        inplace=True
+    )
+    return poly_data.point_normals
 
 def get_source_path(cfg_path: str) -> str:
     with open(cfg_path, 'r') as f:

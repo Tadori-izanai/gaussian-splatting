@@ -11,6 +11,7 @@ import copy
 import numpy as np
 from pytorch3d.loss import chamfer_distance
 from pytorch3d.ops import knn_points
+import json
 
 os.environ['USE_KEOPS'] = '1'
 from geomloss import SamplesLoss
@@ -66,6 +67,8 @@ class MPArtModelBasic:
         self.opt.lambda_dssim = 0.2
         self.opt.column_lr = 0.005
         self.opt.t_lr = 0.00005
+
+        self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
 
     def __init__(self, gaussians: GaussianModel, num_movable: int):
         self.num_movable = num_movable
@@ -161,6 +164,8 @@ class MPArtModelBasic:
             {'params': self._c, 'lr': training_args.t_lr * self.gaussians.spatial_lr_scale, "name": "c"},
         ]
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        for c in self._c:
+            c.requires_grad_(False)
 
     def train(self, gt_gaussians=None):
         pass
@@ -175,6 +180,13 @@ class GMMArtModel(MPArtModelBasic):
         self.opt.cd_until_iter = 7000
         self.opt.cd_from_weight = 0
         self.opt.cd_until_weight = 0.5
+
+        self.opt.cue_iters = 7000   # for selected cue directions
+        self.opt.cue_weight = 1.0   # is not None
+        self.opt.cue_from_iter = 20
+        self.opt.cue_until_iter = 7000
+        self.opt.cue_from_weight = 0
+        self.opt.cue_until_weight = 0.5
 
         self.opt.sgd_interval = 2
 
@@ -207,7 +219,6 @@ class GMMArtModel(MPArtModelBasic):
         # self.opt.sd_weight = 1.0
 
         self.opt.mask_thresh = .85
-        self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
 
     def __init__(self, gaussians: GaussianModel, num_movable: int, new_scheme=True):
         super().__init__(gaussians, num_movable)
@@ -232,6 +243,10 @@ class GMMArtModel(MPArtModelBasic):
         )
         self._p = 1.0
         self.ppp = None
+
+        self.cue_axes = None
+        self.cue_types = None
+        self.cue_axes_all = None
 
         def build_inverse_covariance_from_scaling_rotation(scaling, rot_col1, rot_col2):
             ss = torch.diag_embed(1 / (scaling + 1e-8))
@@ -338,24 +353,6 @@ class GMMArtModel(MPArtModelBasic):
         self.ppp = ppp if save else self.ppp
         return ppp
 
-    def get_ppp_naive(self, pts=None, deformed=False, tau=1.0, eps=1e-8):
-        inv_cov = self.get_inverse_covariance
-        mu = self.get_mu
-        if deformed:
-            assert pts is not None
-            r = torch.stack(self.get_r).to(dtype=mu.dtype)
-            t = torch.stack(self.get_t).to(dtype=mu.dtype)
-            # r = torch.tensor(np.load(os.path.join(self.dataset.model_path, 'r_final.npy'))).to(device='cuda', dtype=mu.dtype)
-            # t = torch.tensor(np.load(os.path.join(self.dataset.model_path, 't_final.npy'))).to(device='cuda', dtype=mu.dtype)
-            inv_cov = r.transpose(1, 2) @ inv_cov @ r
-            mu = torch.einsum('kji,kj->ki', r, mu) + t
-        if pts is None:
-            pts = self.original_xyz
-        quad = eval_quad(pts.unsqueeze(1) - mu, inv_cov) ** self._p
-        ppp = self.get_opacity * torch.exp(-quad / tau)
-        ppp = ppp.clamp(eps, 1 - eps)
-        return ppp / ppp.sum(dim=1, keepdim=True)
-
     def pred_mp(self):
         return torch.argmax(self.get_ppp(), dim=1)
 
@@ -394,6 +391,26 @@ class GMMArtModel(MPArtModelBasic):
             p2 = self.original_xyz.detach().unsqueeze(0)
             _, indices, _ = knn_points(p1, p2, K=1)
             self.pcd_knn_indices.append(indices.flatten())
+
+    def set_cues(self, out_path: str, ):
+        # with open(os.path.join('output/cues.json'), 'r') as json_file:
+        #     cues = json.load(json_file)
+        from cues import cues
+        cues = cues[out_path]
+
+        dirs_path = os.path.join(out_path, 'clustering/axis_dirs')
+
+        if 'which_axis' in cues:
+            self.cue_axes = []
+        self.cue_axes_all = []
+        for k in np.arange(self.num_movable):
+            axes = np.load(os.path.join(dirs_path, f'axes_{k}.npy'))
+            if self.cue_axes is not None:
+                axis = torch.tensor(axes[cues['which_axis'][k]], dtype=torch.float, device='cuda')
+                self.cue_axes.append(axis)
+            self.cue_axes_all.append(torch.tensor(axes, dtype=torch.float, device='cuda'))
+
+        self.cue_types = cues['joint_types']
 
     def _set_init_probabilities(self, prob=None, mu=None, sigma=None, scaling_modifier=1.0, eps=1e-6):
         if prob is not None:
@@ -561,14 +578,12 @@ class GMMArtModel(MPArtModelBasic):
         for c in self._c:
             c.requires_grad_(False)
 
-        # k = 0
-        # for v1, v2 in zip(self._column_vec1, self._column_vec2):
-        #     if k == 2:
-        #         k += 1
-        #         continue
-        #     v1.requires_grad_(False)
-        #     v2.requires_grad_(False)
-        #     k += 1
+        if self.cue_types is not None:
+            for t, v1, v2 in zip(self.cue_types, self._column_vec1, self._column_vec2):
+                if t == 'p':
+                    v1.requires_grad_(False)
+                    v2.requires_grad_(False)
+        return
 
     def _show_losses(self, iteration: int, losses: dict):
         if iteration == self.opt.warmup_until_iter:
@@ -590,12 +605,15 @@ class GMMArtModel(MPArtModelBasic):
         print(loss_msg)
         for k in np.arange(self.num_movable):
             print(f't{k}:', self.get_t[k].detach().cpu().numpy())
-            print(f'r{k}:', self.get_r[k].detach().cpu().numpy())
-            print(f'_c{k}, _t{k}:', self._c[k].detach().cpu().numpy(), self._t[k].detach().cpu().numpy())
+            if self.cue_types is None or self.cue_types[k] == 'r':
+                print(f'r{k}:', self.get_r[k].detach().cpu().numpy())
+                print(f'_c{k}, _t{k}:', self._c[k].detach().cpu().numpy(), self._t[k].detach().cpu().numpy())
         print(self.opt.cd_weight)
         print()
 
-    def _eval_losses(self, render_pkg, viewpoint_cam, gaussians, gt_gaussians=None, requires_cd=False, i=None):
+    def _eval_losses(self, render_pkg, viewpoint_cam, gaussians, gt_gaussians=None, i=None):
+        requires_cd = self.opt.cd_from_iter <= i <= self.opt.cd_until_iter
+        requires_cue = self.opt.cue_from_iter <= i <= self.opt.cue_until_iter
         gt_image = viewpoint_cam.original_image.cuda()
         losses = {
             'im': eval_img_loss(render_pkg['render'], gt_image, self.opt),
@@ -606,6 +624,7 @@ class GMMArtModel(MPArtModelBasic):
             'ppped': None,
             'kl': None,
             'sd': None,
+            'cue': None,
         }
         loss = losses['im']
         if (self.opt.sd_weight is not None) and (gt_gaussians is not None) and requires_cd:
@@ -741,6 +760,16 @@ class GMMArtModel(MPArtModelBasic):
             losses['kl'] /= self.num_movable
             loss += self.opt.kl_weight * losses['kl']
 
+        if (self.opt.cue_weight is not None) and (self.cue_axes_all is not None) and (self.cue_axes is None) and requires_cue:
+            losses['cue'] = 0
+            for k in range(self.num_movable):
+                t_dir, cue_dir = self.get_t[k], self.cue_axes_all[k]
+                cd = cue_dir / torch.norm(cue_dir, dim=1, keepdim=True)
+                td = t_dir / (torch.norm(t_dir) + 1e-8)
+                dots = torch.abs(cd @ td)
+                losses['cue'] += (1 - torch.max(dots))
+            loss += self.opt.cue_weight * losses['cue']
+
         return loss, losses
 
     def _set_ed_knn_indices(self, gt_gaussians: GaussianModel):
@@ -761,11 +790,15 @@ class GMMArtModel(MPArtModelBasic):
         progress_bar = tqdm(range(iterations), desc="Training progress")
         ema_loss_for_log = 0.0
         for i in range(1, iterations + 1):
-            requires_cd = self.opt.cd_from_iter <= i <= self.opt.cd_until_iter
             if self.opt.cd_weight is not None:
                 self.opt.cd_weight = self.cosine_anneal(
                     i, final_step=self.opt.cd_until_iter, start_step=self.opt.cd_from_iter,
                     start_value=self.opt.cd_from_weight, final_value=self.opt.cd_until_weight
+                )
+            if self.opt.cue_weight is not None:
+                self.opt.cue_weight = self.cosine_anneal(
+                    i, final_step=self.opt.cue_from_iter, start_step=self.opt.cue_until_iter,
+                    start_value=self.opt.cue_from_weight, final_value=self.opt.cue_until_weight
                 )
 
             # self._p = self.cosine_anneal(i, start_step=0, final_step=self.opt.warmup_until_iter, start_value=1, final_value=2)
@@ -776,7 +809,7 @@ class GMMArtModel(MPArtModelBasic):
             viewpoint_cam, background = bws.pop_black() if (i % 2 == 0) else bws.pop_white()
             render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, background)
             # render_pkg = render(viewpoint_cam, self.gaussians[self.gaussians.get_opacity.squeeze(-1) > 0.005], self.pipe, background)
-            loss, losses = self._eval_losses(render_pkg, viewpoint_cam, self.gaussians, gt_gaussians, requires_cd=requires_cd, i=i)
+            loss, losses = self._eval_losses(render_pkg, viewpoint_cam, self.gaussians, gt_gaussians, i=i)
             loss.backward()
 
             with torch.no_grad():
@@ -792,12 +825,17 @@ class GMMArtModel(MPArtModelBasic):
                         self._prob[:] = torch.clamp(self._prob, -16, 16)
                         self._opacity[:] = torch.clamp(self._opacity, -16, 16)
                         self._scaling[:] = torch.clamp(self._scaling, -16, 16)
-                        # for t in self._t:
-                        #     t[0::2] = 0.0
                     self.gaussians.get_opacity_raw = self.gaussians.get_opacity_raw.detach()
                     self.gaussians.get_xyz = self.gaussians.get_xyz.detach()
                     self.gaussians.get_rotation_raw = self.gaussians.get_rotation_raw.detach()
                     self.ppp = None
+
+                if i <= self.opt.cue_iters and self.cue_axes is not None:
+                    for ct, d, t in zip(self.cue_types, self.cue_axes, self._t):
+                        if ct == 'p':
+                            d_hat = d / torch.norm(d)
+                            t[:] = (t @ d_hat) * d_hat
+                #fi
 
                 if i == self.opt.warmup_until_iter:
                     print('')
@@ -829,19 +867,15 @@ class MPArtModelJoint(MPArtModelBasic):
         self.opt.min_opacity = 0.005
 
         self.opt.iterations = 9_000
-        # self.opt.iterations = 14_000
         self.opt.densification_interval = 50
         self.opt.opacity_reset_interval = 2000
         self.opt.densify_from_iter = 50
         self.opt.densify_until_iter = 6_000
-        # self.opt.densify_until_iter = 11_000
 
         self.opt.collision_knn = 32
         self.opt.collision_weight = 0.02
         self.opt.collision_from_iter = 1
-        # self.opt.collision_from_iter = 5000
-        self.opt.collision_until_iter = 10000
-        # self.opt.collision_until_iter = self.opt.iterations
+        self.opt.collision_until_iter = self.opt.densify_until_iter
         self.opt.collision_after_reset_iter = 500
 
         self.opt.depth_weight = 1.0
@@ -907,7 +941,7 @@ class MPArtModelJoint(MPArtModelBasic):
         return self.gaussians
 
     def _show_losses(self, iteration: int, losses: dict):
-        if iteration in [1000, 5000, 14000]:
+        if iteration in [2, 1000, 3000, 5000, 7000, 9000]:
             self.canonical_gaussians.save_ply(
                 os.path.join(self.dataset_ed.model_path, f'point_cloud/iteration_{iteration - 1}/point_cloud.ply'),
                 prune=False
@@ -916,11 +950,11 @@ class MPArtModelJoint(MPArtModelBasic):
                 os.path.join(self.dataset_ed.model_path, f'point_cloud/iteration_{iteration - 2}/point_cloud.ply'),
                 prune=False
             )
+            self.canonical_gaussians[self.mask].save_ply(
+                os.path.join(self.dataset_ed.model_path, f'point_cloud/iteration_{-iteration}/point_cloud.ply'),
+            )
 
-        if iteration not in [1, 20, 50, 200, 500, 1000, 2000, 3000,
-                             5000,
-                             7000, 10000,
-                             14000]:
+        if iteration not in [1, 20, 200, 1000, 2000, 3000, 5000, 7000, 9000]:
             return
         loss_msg = f"\niteration {iteration}:"
         for name, loss in losses.items():
@@ -928,10 +962,9 @@ class MPArtModelJoint(MPArtModelBasic):
                 loss_msg += f"  {name} {loss.item():.{7}f}"
         print(loss_msg)
 
-        if iteration <= self.opt.collision_from_iter:
-            for k in range(self.num_movable):
-                print(f't{k}:', self.get_t[k].detach().cpu().numpy())
-                print(f'r{k}:', self.get_r[k].detach().cpu().numpy())
+        for k in range(self.num_movable):
+            print(f't{k}:', self.get_t[k].detach().cpu().numpy())
+            print(f'r{k}:', self.get_r[k].detach().cpu().numpy())
         print()
 
     @override
@@ -942,20 +975,24 @@ class MPArtModelJoint(MPArtModelBasic):
         self.training_setup(self.opt)
 
         for k in range(self.num_movable):
-            if torch.trace(self.get_r[k]) < 3 * (1 - 1e-6): # revolute
+            if torch.abs(torch.trace(self.get_r[k])) < self.opt.trace_r_thresh: # revolute
                 continue
-            self._column_vec1[k].requires_grad_(False)
-            self._column_vec2[k].requires_grad_(False)
+            self._column_vec1[k] = nn.Parameter(torch.tensor([1, 0, 0], dtype=torch.float, device='cuda').requires_grad_(False))
+            self._column_vec2[k] = nn.Parameter(torch.tensor([0, 1, 0], dtype=torch.float, device='cuda').requires_grad_(False))
 
         ema_loss_for_log = 0.0
         progress_bar = tqdm(range(iterations), desc="Training progress")
         prev_opacity_reset_iter = -114514
         for i in range(1, iterations + 1):
-            if i == self.opt.collision_from_iter:
-                for k in range(self.num_movable):
-                    self._t[k].requires_grad_(False)
-                    self._column_vec1[k].requires_grad_(False)
-                    self._column_vec2[k].requires_grad_(False)
+            # if i == self.opt.collision_from_iter:
+            #     print(1123123)
+            #     for k in range(self.num_movable):
+            #         self._t[k].requires_grad_(False)
+            #         self._column_vec1[k].requires_grad_(False)
+            #         self._column_vec2[k].requires_grad_(False)
+
+            if i == self.opt.collision_until_iter + 1:
+                self.canonical_gaussians.cancel_grads()
 
             # Pick a random Camera from st and ed respectively
             viewpoint_cam_st, background_st = bws_st.pop_black() if (i % 2 == 0) else bws_st.pop_white()
@@ -1015,12 +1052,6 @@ class MPArtModelJoint(MPArtModelBasic):
                 if i % 10 == 0:
                     progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
                     progress_bar.update(10)
-
-                # if i == self.opt.collision_from_iter:
-                #     for k in range(self.num_movable):
-                #         self._t[k].requires_grad_(False)
-                #         self._column_vec1[k].requires_grad_(False)
-                #         self._column_vec2[k].requires_grad_(False)
 
                 # Densification
                 if i < self.opt.densify_until_iter:

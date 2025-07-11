@@ -16,10 +16,10 @@ from arguments import get_default_args
 from utils.loss_utils import eval_losses, show_losses, eval_img_loss, eval_opacity_bce_loss, eval_depth_loss
 from scene import BWScenes
 from scene.gaussian_model import GaussianModel
-from scene.dataset_readers import readCamerasFromTransforms
+from scene.dataset_readers import readCamerasFromTransforms, fetchPly
 from scene.multipart_models import GMMArtModel
 from utils.general_utils import get_per_point_cd, otsu_with_peak_filtering, inverse_sigmoid, \
-    decompose_covariance_matrix, rotation_matrix_from_axis_angle, eval_quad, knn
+    decompose_covariance_matrix, rotation_matrix_from_axis_angle, eval_quad, knn, mat2quat, quat_mult
 from utils.graphics_utils import getProjectionMatrix, getWorld2View
 
 def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, depth_weight=None):
@@ -278,7 +278,8 @@ def estimate_se3(p: torch.tensor, p_prime: torch.tensor, k_neighbors=21):
     p_prime_neighbors = p_prime[indices]
     return estimate_se3_batch(p_neighbors, p_prime_neighbors)  # R: (n_samples, 3, 3), t: (n_samples, 3)
 
-def save_axis_mesh(d: np.ndarray, o: np.ndarray, filepath: str, o_ref=None):
+def save_axis_mesh(d: np.ndarray, o: np.ndarray, filepath: str, o_ref=None, to_gaussians=False, c=(1, 1, 1)):
+    r_arrow = None
     if o_ref is None:
         o_ref = np.zeros(3)
     if (np.abs(o) < 1e-6).all():  # prismatic
@@ -297,49 +298,100 @@ def save_axis_mesh(d: np.ndarray, o: np.ndarray, filepath: str, o_ref=None):
     axis.translate(o[:3])
     o3d.io.write_triangle_mesh(filepath, axis)
 
+    if to_gaussians:
+        with torch.no_grad():
+            ags = get_gaussians('output/zarrow', from_chk=False, iters=30000)
+            r_arrow = torch.tensor(r_arrow, device=ags.get_xyz.device, dtype=ags.get_xyz.dtype)
+            o = torch.tensor(o, device=ags.get_xyz.device, dtype=ags.get_xyz.dtype)
+            if np.linalg.norm(n) > 1e-4:
+                ags.get_xyz[:] = torch.einsum('ij,nj->ni', r_arrow, ags.get_xyz[:])
+                ags.get_rotation_raw[:] = quat_mult(mat2quat(r_arrow), ags.get_rotation[:])
+            ags.get_xyz[:] =  ags.get_xyz[:] + o[:3]
+            fused_color = torch.zeros(ags.size(), 3)
+            fused_color[:] = torch.tensor(c)
+            ags.save_vis(filepath, fused_color)
+    # fi
+
+def list_of_clusters(cluster_dir: str, num_movable: int, ret_normal=False):
+    pts = []
+    nms = []
+    for i in np.arange(32):
+        ply_file = os.path.join(cluster_dir, f'points3d_{i}.ply')
+        if not os.path.exists(ply_file):
+            continue
+        pts.append(np.asarray(fetchPly(ply_file).points))
+        nms.append(np.asarray(fetchPly(ply_file).normals))
+        if len(pts) == num_movable:
+            break
+    assert len(pts) == num_movable
+    if ret_normal:
+        return pts, nms
+    return pts
+
+def put_axes(out_path, st_path, num_movable: int):
+    gaussians_st = get_gaussians(st_path, from_chk=False, iters=30000)
+    for k in range(num_movable):
+        axis0 = GaussianModel(0).load_ply(os.path.join(out_path, f'clustering/axes_gaussians/axis{k}_0.ply'))
+        axis1 = GaussianModel(0).load_ply(os.path.join(out_path, f'clustering/axes_gaussians/axis{k}_1.ply'))
+        axis2 = GaussianModel(0).load_ply(os.path.join(out_path, f'clustering/axes_gaussians/axis{k}_2.ply'))
+        obj_with_axes = gaussians_st + axis0 + axis1 + axis2
+        obj_with_axes.save_ply(os.path.join(out_path, f'point_cloud/iteration_-{k + 100}/point_cloud.ply'))
+    return
+
+def estimate_principal_directions(normals: np.ndarray, ort: str='qr', k: int=3) -> np.ndarray:
+    """
+        Estimate three orthogonal directions from normals, treating opposite directions as equivalent.
+
+        Args:
+            normals: np.ndarray of shape (N, 3), unit normals.
+            k: int, number of clusters (default 3).
+            ort: str, 'qr' for QR decomposition or 'gs' for Gram-Schmidt.
+
+        Returns:
+            directions: np.ndarray of shape (3, 3), where each row is a direction.
+        """
+    # Normalize normals
+    normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+
+    # Map to first octant
+    normals_abs = np.abs(normals)
+
+    # Cluster normals
+    kmeans = KMeans(n_clusters=k, random_state=0).fit(normals_abs)
+    labels = kmeans.labels_
+
+    # Sort clusters by size
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    sort_indices = np.argsort(counts)[::-1]
+    top_k_labels = unique_labels[sort_indices][:k]
+
+    # Compute mean directions, ordered by cluster size
+    directions = np.zeros((k, 3))
+    for i, label in enumerate(top_k_labels):
+        cluster_normals = normals[labels == label]
+        if len(cluster_normals) == 0:
+            raise ValueError(f"Cluster {label} is empty.")
+        mean_dir = np.mean(cluster_normals, axis=0)
+        mean_dir = mean_dir / np.linalg.norm(mean_dir)
+        directions[i] = mean_dir
+
+    # Orthogonalize
+    if ort == 'gs':
+        def gram_schmidt(vectors):
+            u = np.zeros_like(vectors)
+            u[0] = vectors[0] / np.linalg.norm(vectors[0])
+            u[1] = vectors[1] - np.dot(vectors[1], u[0]) * u[0]
+            u[1] = u[1] / np.linalg.norm(u[1])
+            u[2] = vectors[2] - np.dot(vectors[2], u[0]) * u[0] - np.dot(vectors[2], u[1]) * u[1]
+            u[2] = u[2] / np.linalg.norm(u[2])
+            return u
+        directions = gram_schmidt(directions)
+    else:  # Default to QR
+        directions, _ = np.linalg.qr(directions)
+
+    return directions
+
 if __name__ == '__main__':
-    def init_demo_v2(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int):
-        mk_output_dir(out_path, os.path.join(data_path, 'start'))
-        gaussians_st = get_gaussians(st_path, from_chk=True)
-        gaussians_ed = get_gaussians(ed_path, from_chk=True)
-
-        st_data = os.path.join(data_path, 'start')
-        ed_data = os.path.join(data_path, 'end')
-        st_mask = get_vis_mask(gaussians_st, ed_data)
-        ed_mask = get_vis_mask(gaussians_ed, st_data)
-        gaussians_st = gaussians_st[st_mask]
-        gaussians_ed = gaussians_ed[ed_mask]
-
-        cd, cd_is, mpp = init_mpp(gaussians_st, gaussians_ed, thr=-4)
-        mask_s = (mpp < .5)
-        mu, sigma = eval_init_gmm_params(train_pts=gaussians_st[~mask_s].get_xyz, num=num_movable)
-
-        gaussians_st[~mask_s].save_ply(os.path.join(out_path, 'point_cloud/iteration_10/point_cloud.ply'))
-        np.save(os.path.join(out_path, 'mu_init.npy'), mu.detach().cpu().numpy())
-        np.save(os.path.join(out_path, 'sigma_init.npy'), sigma.detach().cpu().numpy())
-
-        ## gmm_am_optim_demo_v2
-        torch.autograd.set_detect_anomaly(False)
-        gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
-        am = GMMArtModel(gaussians_st, num_movable)
-        am.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path)
-        am.set_init_params(out_path, scaling_modifier=1)
-        am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_9/point_cloud.ply'))
-
-    K = 6
-    st = 'output/sto6_st'
-    ed = 'output/sto6_ed'
-    data = 'data/artgs/storage_47648'
-    out = 'output/sto6'
-    rev = True
-
-    # K = 4
-    # st = 'output/tbr4_st'
-    # ed = 'output/tbr4_ed'
-    # data = 'data/teeburu34178'
-    # out = 'output/tbr4'
-    # rev = False
-
-    init_demo_v2(out, st, ed, data, num_movable=K)
-
+    arrow_path = 'output/zarrow/mesh.ply'
+    save_axis_mesh(np.array([0., 0., 1.]), np.zeros(3), arrow_path)
     pass

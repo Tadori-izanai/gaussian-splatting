@@ -2,7 +2,8 @@ import os
 import torch
 
 from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
+from utils.general_utils import safe_state, pca_on_pointcloud, \
+    calculate_obb_o3d, calculate_obb_pv, estimate_normals_o3d, estimate_normals_pv
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -25,7 +26,8 @@ from scene.dataset_readers import fetchPly, storePly
 
 from main_utils import train_single, get_gaussians, print_motion_params, plot_hist, \
     mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, eval_init_gmm_params, \
-    modify_scaling, get_vis_mask, estimate_se3, eval_mu_sigma, save_axis_mesh
+    modify_scaling, get_vis_mask, estimate_se3, eval_mu_sigma, save_axis_mesh, list_of_clusters, \
+    estimate_principal_directions, put_axes
 from metric_utils import get_gt_motion_params, interpret_transforms, eval_axis_metrics, \
     get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics
 
@@ -82,9 +84,12 @@ def cluster_demo(out_path: str, data_path: str, num_movable: int, thr: int=-5):
     for k, pcd in pts[:num_movable]:
         if k == -1:
             k1, pcd1 = pts[num_movable]
-            storePly(os.path.join(ply_path, f'clusters/points3d_{k1}.ply'), pcd1, np.zeros_like(pcd1))
+            normals = estimate_normals_o3d(pcd1)
+            storePly(os.path.join(ply_path, f'clusters/points3d_{k1}.ply'), pcd1, np.zeros_like(pcd1), normals)
+            print('warning: has -1')
             continue
-        storePly(os.path.join(ply_path, f'clusters/points3d_{k}.ply'), pcd, np.zeros_like(pcd))
+        normals = estimate_normals_o3d(pcd)
+        storePly(os.path.join(ply_path, f'clusters/points3d_{k}.ply'), pcd, np.zeros_like(pcd), normals)
     storePly(os.path.join(ply_path, f'points3d.ply'), x, np.zeros_like(x))
 
 def init_demo_from_dbscan(out_path, st_path, ed_path, num_movable: int):
@@ -97,23 +102,43 @@ def init_demo_from_dbscan(out_path, st_path, ed_path, num_movable: int):
     plot_hist(mpp, os.path.join(out_path, 'mpp.png'))
     np.save(os.path.join(out_path, 'mpp_init.npy'), mpp.detach().cpu().numpy())
 
-    pts = []
-    cluster_dir = os.path.join(out_path, 'clustering/clusters')
-    for i in np.arange(20):
-        ply_file = os.path.join(cluster_dir, f'points3d_{i}.ply')
-        if not os.path.exists(ply_file):
-            continue
-        pts.append(np.asarray(fetchPly(ply_file).points))
-        if len(pts) == num_movable:
-            break
-    assert len(pts) == num_movable
-
+    pts = list_of_clusters(os.path.join(out_path, 'clustering/clusters'), num_movable)
     mu = np.zeros((num_movable, 3))
     sigma = np.zeros((num_movable, 3, 3))
     for i in np.arange(num_movable):
         mu[i], sigma[i] = eval_mu_sigma(pts[i])
     np.save(os.path.join(out_path, 'mu_init.npy'), mu)
     np.save(os.path.join(out_path, 'sigma_init.npy'), sigma)
+
+def joint_init_demo(out_path: str, st_path: str, num_movable: int):
+    # pca_dir = os.path.join(out_path, 'clustering/pca_axes')
+    # obb_dir = os.path.join(out_path, 'clustering/obb_axes')
+    nrm_dir = os.path.join(out_path, 'clustering/nrm_axes')
+    dirs_dir = os.path.join(out_path, 'clustering/axis_dirs')
+    gaussians_dir = os.path.join(out_path, 'clustering/axes_gaussians')
+    # os.makedirs(pca_dir, exist_ok=True)
+    # os.makedirs(obb_dir, exist_ok=True)
+    os.makedirs(nrm_dir, exist_ok=True)
+    os.makedirs(dirs_dir, exist_ok=True)
+    os.makedirs(gaussians_dir, exist_ok=True)
+
+    parts, nms = list_of_clusters(os.path.join(out_path, 'clustering/clusters'), num_movable, ret_normal=True)
+    mu = np.load(os.path.join(out_path, 'mu_init.npy'))
+    for k, pcd in enumerate(parts):
+        # _, pca_dirs, _ = pca_on_pointcloud(pcd)
+        # _, obb_dirs, _ = calculate_obb_pv(pcd)
+        nrm_dirs = estimate_principal_directions(nms[k], ort='gs')
+        o = np.zeros(3)
+        for i in np.arange(3):
+            # save_axis_mesh(pca_dirs[i], o, os.path.join(pca_dir, f'axis{k}_{i}.ply'), mu[k])
+            # save_axis_mesh(obb_dirs[i], o, os.path.join(obb_dir, f'axis{k}_{i}.ply'), mu[k])
+            d = np.sign(mu[k]) * np.abs(nrm_dirs[i])  # reduce occlusion
+            save_axis_mesh(d, o, os.path.join(nrm_dir, f'axis{k}_{i}.ply'), mu[k])
+            save_axis_mesh(d, o, os.path.join(gaussians_dir, f'axis{k}_{i}.ply'), mu[k],
+                           to_gaussians=True, c=COLORS[i])
+        np.save(os.path.join(dirs_dir, f'axes_{k}.npy'), nrm_dirs)
+        print('done with axis', k)
+    put_axes(out_path, st_path, num_movable)
 
 def gmm_am_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int, thr=0.85):
     torch.autograd.set_detect_anomaly(False)
@@ -123,6 +148,7 @@ def gmm_am_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str,
     am = GMMArtModel(gaussians_st, num_movable, new_scheme=False)
     am.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path, thr=cd_thr)
     am.set_init_params(out_path, scaling_modifier=1)
+    am.set_cues(out_path)
     # am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_9/point_cloud.ply'))
     am.save_all_vis(-10)
     t, r = am.train(gt_gaussians=gaussians_ed)
@@ -220,147 +246,167 @@ def eval_demo(out_path: str, data_path: str, num_movable: int, reverse=True):
         json.dump(metrics_axis | metrics_cd, outfile, indent=4)
 
 if __name__ == '__main__':
-    ### paris and dta
-    # K = 1
-    # st = 'output/paris/usb_st'
-    # ed = 'output/paris/usb_ed'
-    # data = 'data/dta/USB_100109'
-    # out = 'output/paris/usb'
-    # rev = True
+    # PARIS and DTA
+    if True:
+        # K = 1
+        # st = 'output/paris/usb_st'
+        # ed = 'output/paris/usb_ed'
+        # data = 'data/dta/USB_100109'
+        # out = 'output/paris/usb'
+        # rev = True
 
-    # K = 2
-    # st = 'output/dta/storage_st'
-    # ed = 'output/dta/storage_ed'
-    # data = 'data/dta_multi/storage_47254'
-    # out = 'output/dta/storage'
-    # rev = True
+        # K = 1
+        # st = 'output/paris/blade_st'
+        # ed = 'output/paris/blade_ed'
+        # data = 'data/dta/blade_103706'
+        # out = 'output/paris/blade'
+        # rev = False
 
-    # st = 'output/dta/fridge_st'
-    # ed = 'output/dta/fridge_ed'
-    # data = 'data/dta_multi/fridge_10489'
-    # out = 'output/dta/fridge'
-    # rev = True
+        # K = 2
+        # st = 'output/dta/storage_st'
+        # ed = 'output/dta/storage_ed'
+        # data = 'data/dta_multi/storage_47254'
+        # out = 'output/dta/storage'
+        # rev = True
 
-    ################## Ours failed ##################
-    # K = 5
-    # st = 'output/single/tbr5_st'
-    # ed = 'output/single/tbr5_ed'
-    # data = 'data/teeburu34610'
-    # out = 'output/tbr5'
-    # rev = False
+        # st = 'output/dta/fridge_st'
+        # ed = 'output/dta/fridge_ed'
+        # data = 'data/dta_multi/fridge_10489'
+        # out = 'output/dta/fridge'
+        # rev = True
+        pass
+    # fi
 
-    # st = 'output/single/ob5_st'
-    # ed = 'output/single/ob5_ed'
-    # data = 'data/oobun7201'
-    # out = 'output/ob5'
-    # rev = False
+    # Ours failed
+    if True:
+        K = 5
+        st = 'output/single/tbr5_st'
+        ed = 'output/single/tbr5_ed'
+        data = 'data/teeburu34610'
+        out = 'output/tbr5'
+        rev = False
 
-    # K = 7
-    # st = 'output/single/nf_st'
-    # ed = 'output/single/nf_ed'
-    # data = 'data/naifu2'
-    # out = 'output/nf'
-    # rev = False
-    # cd_thr = -6
+        # K = 5
+        # st = 'output/single/ob5_st'
+        # ed = 'output/single/ob5_ed'
+        # data = 'data/oobun7201'
+        # out = 'output/ob5'
+        # rev = False
 
-    # K = 10
-    # st = 'output/single/str_st'
-    # ed = 'output/single/str_ed'
-    # data = 'data/sutoreeji47585'
-    # out = 'output/str'
-    # rev = False
-    # cd_thr = -10
-    # dbs_eps = 0.004
+        # K = 7
+        # st = 'output/single/nf_st'
+        # ed = 'output/single/nf_ed'
+        # data = 'data/naifu2'
+        # out = 'output/nf'
+        # rev = False
+        # cd_thr = -6
 
-    ################## ArtGS ##################
-    K = 3
-    st = 'output/artgs/oven_st'
-    ed = 'output/artgs/oven_ed'
-    data = 'data/artgs/oven_101908'
-    out = 'output/artgs/oven'
-    rev = False
+        # K = 10
+        # st = 'output/single/str_st'
+        # ed = 'output/single/str_ed'
+        # data = 'data/sutoreeji47585'
+        # out = 'output/str'
+        # rev = False
+        # cd_thr = -10
+        # dbs_eps = 0.004
 
-    K = 3
-    st = 'output/artgs/tbl3_st'
-    ed = 'output/artgs/tbl3_ed'
-    data = 'data/artgs/table_25493'
-    out = 'output/artgs/tbl3'
-    rev = True
+        pass
+    # fi
 
-    # K = 3
-    # st = 'output/artgs/sto3_st'
-    # ed = 'output/artgs/sto3_ed'
-    # data = 'data/artgs/storage_45503'
-    # out = 'output/artgs/sto3'
-    # rev = True
+    # ArtGS
+    if True:
+        # K = 3
+        # st = 'output/artgs/oven_st'
+        # ed = 'output/artgs/oven_ed'
+        # data = 'data/artgs/oven_101908'
+        # out = 'output/artgs/oven'
+        # rev = False
 
-    # K = 4
-    # st = 'output/artgs/tbl4_st'
-    # ed = 'output/artgs/tbl4_ed'
-    # data = 'data/artgs/table_31249'
-    # out = 'output/artgs/tbl4'
-    # rev = False
+        K = 3
+        st = 'output/artgs/tbl3_st'
+        ed = 'output/artgs/tbl3_ed'
+        data = 'data/artgs/table_25493'
+        out = 'output/artgs/tbl3'
+        rev = True
 
-    # K = 6
-    # st = 'output/artgs/sto6_st'
-    # ed = 'output/artgs/sto6_ed'
-    # data = 'data/artgs/storage_47648'
-    # out = 'output/artgs/sto6'
-    # rev = True
+        # K = 3
+        # st = 'output/artgs/sto3_st'
+        # ed = 'output/artgs/sto3_ed'
+        # data = 'data/artgs/storage_45503'
+        # out = 'output/artgs/sto3'
+        # rev = True
 
-    ################## Ours ##################
-    # K = 4
-    # st = 'output/single/tbr4_st'
-    # ed = 'output/single/tbr4_ed'
-    # data = 'data/teeburu34178'
-    # out = 'output/tbr4'
-    # rev = False
+        # K = 4
+        # st = 'output/artgs/tbl4_st'
+        # ed = 'output/artgs/tbl4_ed'
+        # data = 'data/artgs/table_31249'
+        # out = 'output/artgs/tbl4'
+        # rev = False
 
-    # K = 6
-    # st = 'output/single/sut_st'
-    # ed = 'output/single/sut_ed'
-    # data = 'data/sutoreeji40417'
-    # out = 'output/sut'
-    # rev = False
+        # K = 6
+        # st = 'output/artgs/sto6_st'
+        # ed = 'output/artgs/sto6_ed'
+        # data = 'data/artgs/storage_47648'
+        # out = 'output/artgs/sto6'
+        # rev = True
 
-    ################## Ours extra ##################
-    # K = 2
-    # st = 'output/single/mado_st'
-    # ed = 'output/single/mado_ed'
-    # data = 'data/uindou103238'
-    # out = 'output/mado'
-    # rev = False
+        pass
+    # fi
 
-    K = 4
-    st = 'output/single/tee_st'
-    ed = 'output/single/tee_ed'
-    data = 'data/teeburu23372'
-    out = 'output/tee'
-    rev = False
+    # Ours
+    if True:
+        # K = 4
+        # st = 'output/single/tbr4_st'
+        # ed = 'output/single/tbr4_ed'
+        # data = 'data/teeburu34178'
+        # out = 'output/tbr4'
+        # rev = False
 
-    # K = 4
-    # st = 'output/single/sto4_st'
-    # ed = 'output/single/sto4_ed'
-    # data = 'data/sutoreeji45759'
-    # out = 'output/sto4'
-    # rev = False
+        # K = 6
+        # st = 'output/single/sut_st'
+        # ed = 'output/single/sut_ed'
+        # data = 'data/sutoreeji40417'
+        # out = 'output/sut'
+        # rev = False
 
-    # K = 3
-    # st = 'output/single/st3_st'
-    # ed = 'output/single/st3_ed'
-    # data = 'data/sutoreeji48063'
-    # out = 'output/st3'
-    # rev = False
+        ################## Ours extra ##################
+        # K = 2
+        # st = 'output/single/mado_st'
+        # ed = 'output/single/mado_ed'
+        # data = 'data/uindou103238'
+        # out = 'output/mado'
+        # rev = False
 
-    K = 3
-    st = 'output/single/te3_st'
-    ed = 'output/single/te3_ed'
-    data = 'data/teeburu33116'
-    out = 'output/te3'
-    rev = False
+        # K = 4
+        # st = 'output/single/tee_st'
+        # ed = 'output/single/tee_ed'
+        # data = 'data/teeburu23372'
+        # out = 'output/tee'
+        # rev = False
 
+        # K = 4
+        # st = 'output/single/sto4_st'
+        # ed = 'output/single/sto4_ed'
+        # data = 'data/sutoreeji45759'
+        # out = 'output/sto4'
+        # rev = False
 
-    ################## END ##################
+        # K = 3
+        # st = 'output/single/st3_st'
+        # ed = 'output/single/st3_ed'
+        # data = 'data/sutoreeji48063'
+        # out = 'output/st3'
+        # rev = False
+
+        # K = 3
+        # st = 'output/single/te3_st'
+        # ed = 'output/single/te3_ed'
+        # data = 'data/teeburu33116'
+        # out = 'output/te3'
+        # rev = False
+
+        pass
+    # fifififififififififififififififififififififififififififififififififififi
 
     # train_single_demo(st, os.path.join(data, 'start'))
     # train_single_demo(ed, os.path.join(data, 'end'))
@@ -368,6 +414,7 @@ if __name__ == '__main__':
 
     # cluster_demo(out, data, K, thr=cd_thr)
     # init_demo_from_dbscan(out, st, ed, K)
+    # joint_init_demo(out, st, K)
     # exit(0)
 
     get_gt_motion_params(data, reverse=rev)
