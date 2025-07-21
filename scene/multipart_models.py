@@ -25,7 +25,8 @@ from scene import BWScenes
 from scene.dataset_readers import fetchPly, storePly
 from utils.general_utils import quat_mult, mat2quat, inverse_sigmoid, inverse_softmax, \
     strip_symmetric, build_scaling_rotation, eval_quad, decompose_covariance_matrix, build_rotation, \
-    find_close, find_files_with_suffix, kl_divergence_gaussian, value_to_rgb
+    find_close, find_files_with_suffix, kl_divergence_gaussian, value_to_rgb, shift_aabb_from_collision, \
+    get_extended_aabb
 from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd, \
     eval_knn_opacities_collision_loss, eval_opacity_bce_loss, eval_depth_loss, sample_pts
 from utils.system_utils import mkdir_p
@@ -182,7 +183,6 @@ class GMMArtModel(MPArtModelBasic):
         self.opt.cd_until_weight = 0.5
 
         self.opt.cue_iters = 7000   # for selected cue directions
-        self.opt.cue_weight = 1.0   # is not None
         self.opt.cue_from_iter = 20
         self.opt.cue_until_iter = 7000
         self.opt.cue_from_weight = 0
@@ -209,6 +209,7 @@ class GMMArtModel(MPArtModelBasic):
         self.opt.ppp_weight_ed = None
         self.opt.kl_weight = None
         self.opt.sd_weight = None
+        self.opt.cue_weight = None
 
         self.opt.depth_weight = 1.0
         self.opt.cd_weight = 1.0
@@ -217,6 +218,7 @@ class GMMArtModel(MPArtModelBasic):
         # self.opt.ppp_weight_ed = 0.1
         # self.opt.kl_weight = 1e-5
         # self.opt.sd_weight = 1.0
+        # self.opt.cue_weight = 1.0   # is not None
 
         self.opt.mask_thresh = .85
 
@@ -247,6 +249,9 @@ class GMMArtModel(MPArtModelBasic):
         self.cue_axes = None
         self.cue_types = None
         self.cue_axes_all = None
+        self.aabbs_min, self.aabbs_max = None, None
+        self.aabbs_min_ext, self.aabbs_max_ext = None, None
+        self.collisions = set()
 
         def build_inverse_covariance_from_scaling_rotation(scaling, rot_col1, rot_col2):
             ss = torch.diag_embed(1 / (scaling + 1e-8))
@@ -393,24 +398,47 @@ class GMMArtModel(MPArtModelBasic):
             self.pcd_knn_indices.append(indices.flatten())
 
     def set_cues(self, out_path: str, ):
-        # with open(os.path.join('output/cues.json'), 'r') as json_file:
-        #     cues = json.load(json_file)
+        dirs_path = os.path.join(out_path, 'clustering')
+
         from cues import cues
         cues = cues[out_path]
-
-        dirs_path = os.path.join(out_path, 'clustering/axis_dirs')
-
         if 'which_axis' in cues:
             self.cue_axes = []
+
         self.cue_axes_all = []
+        self.aabbs_min, self.aabbs_max = [], []
+
+        axes = np.load(os.path.join(dirs_path, 'axes.npy'))
+        aabbs_min = np.load(os.path.join(dirs_path, 'aabbs_min.npy'))
+        aabbs_max = np.load(os.path.join(dirs_path, 'aabbs_max.npy'))
         for k in np.arange(self.num_movable):
-            axes = np.load(os.path.join(dirs_path, f'axes_{k}.npy'))
+            axes[k] /= np.linalg.norm(axes[k], axis=1, keepdims=True)
+            self.cue_axes_all.append(torch.tensor(axes[k], dtype=torch.float, device='cuda'))
+            self.aabbs_min.append(torch.tensor(aabbs_min[k], dtype=torch.float, device='cuda'))
+            self.aabbs_max.append(torch.tensor(aabbs_max[k], dtype=torch.float, device='cuda'))
+
             if self.cue_axes is not None:
-                axis = torch.tensor(axes[cues['which_axis'][k]], dtype=torch.float, device='cuda')
+                axis = torch.tensor(axes[k][cues['which_axis'][k]], dtype=torch.float, device='cuda')
                 self.cue_axes.append(axis)
-            self.cue_axes_all.append(torch.tensor(axes, dtype=torch.float, device='cuda'))
 
         self.cue_types = cues['joint_types']
+        # # resolve collisions
+        # for k1 in range(self.num_movable):
+        #     for k2 in range(k1 + 1, self.num_movable):
+        #         if self.cue_types[k1] == 'p' and self.cue_types[k2] == 'p':
+        #             has_collision, db1_min, db1_max, db2_min, db2_max = check_and_resolve_aabb_collision(
+        #                 self.aabbs_min[k1], self.aabbs_max[k1], self.aabbs_min[k2], self.aabbs_max[k2], eps=1e-3
+        #             )
+        #             if has_collision:
+        #                 print(f'collision: {k1}, {k2}')
+        #                 self.aabbs_min[k1] += db1_min
+        #                 self.aabbs_max[k1] += db1_max
+        #                 self.aabbs_min[k2] += db2_min
+        #                 self.aabbs_max[k2] += db2_max
+
+        self.aabbs_min_ext = [t.clone().detach() for t in self.aabbs_min]
+        self.aabbs_max_ext = [t.clone().detach() for t in self.aabbs_max]
+
 
     def _set_init_probabilities(self, prob=None, mu=None, sigma=None, scaling_modifier=1.0, eps=1e-6):
         if prob is not None:
@@ -608,7 +636,8 @@ class GMMArtModel(MPArtModelBasic):
             if self.cue_types is None or self.cue_types[k] == 'r':
                 print(f'r{k}:', self.get_r[k].detach().cpu().numpy())
                 print(f'_c{k}, _t{k}:', self._c[k].detach().cpu().numpy(), self._t[k].detach().cpu().numpy())
-        print(self.opt.cd_weight)
+        print('cd_weight:', self.opt.cd_weight)
+        print('collisions:', self.collisions)
         print()
 
     def _eval_losses(self, render_pkg, viewpoint_cam, gaussians, gt_gaussians=None, i=None):
@@ -778,6 +807,49 @@ class GMMArtModel(MPArtModelBasic):
         _, indices, _ = knn_points(p1, p2, K=1)
         self.ed_knn_indices = indices.flatten()
 
+    def use_cues(self, i: int):
+        # has "which_axis" cues
+        if i <= self.opt.cue_iters and self.cue_axes is not None:
+            for ct, d, t in zip(self.cue_types, self.cue_axes, self._t):
+                if ct == 'p':
+                    d_hat = d / torch.norm(d)
+                    t[:] = (t @ d_hat) * d_hat
+
+        # has "joint_types" cues
+        elif i <= self.opt.cue_iters and self.cue_types is not None:
+            # restricts movement
+            for k, idx in self.collisions:
+                proj_t = self._t[k] @ self.cue_axes_all[k].T
+                proj_t[idx] = 0
+                self._t[k][:] = proj_t @ self.cue_axes_all[k]
+            # detects collision
+            for k1 in range(self.num_movable):
+                for k2 in range(k1 + 1, self.num_movable):
+                    if self.cue_types[k1] == 'p' and self.cue_types[k2] == 'p':
+                        has_collision, idx = shift_aabb_from_collision(
+                            (self.aabbs_min_ext[k1], self.aabbs_max_ext[k1]),
+                            (self.aabbs_min_ext[k2], self.aabbs_max_ext[k2]),
+                            self.cue_axes_all[k1], self._t[k1], self._t[k2]
+                        )
+                        if has_collision and (
+                            ((k1, idx) not in self.collisions) or ((k2, idx) not in self.collisions)
+                        ):
+                            print('collision:')
+                            print(f't{k1}:', self._t[k1].tolist())
+                            print(f't{k2}:', self._t[k2].tolist())
+                            self.collisions.add((k1, idx))
+                            self.collisions.add((k2, idx))
+                            print(self.collisions, '\n')
+
+            # extends AABBs
+            for k in range(self.num_movable):
+                if self.cue_types[k] == 'p':
+                    self.aabbs_min_ext[k], self.aabbs_max_ext[k] = get_extended_aabb(
+                        self.aabbs_min_ext[k], self.aabbs_max_ext[k], self.aabbs_min[k], self.aabbs_max[k],
+                        self.cue_axes_all[k], self._t[k]
+                    )
+        # fi
+
     @override
     def train(self, gt_gaussians):
         _ = prepare_output_and_logger(self.dataset)
@@ -812,7 +884,7 @@ class GMMArtModel(MPArtModelBasic):
             loss, losses = self._eval_losses(render_pkg, viewpoint_cam, self.gaussians, gt_gaussians, i=i)
             loss.backward()
 
-            with torch.no_grad():
+            with (torch.no_grad()):
                 ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
                 if i % 10 == 0:
                     progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
@@ -830,12 +902,7 @@ class GMMArtModel(MPArtModelBasic):
                     self.gaussians.get_rotation_raw = self.gaussians.get_rotation_raw.detach()
                     self.ppp = None
 
-                if i <= self.opt.cue_iters and self.cue_axes is not None:
-                    for ct, d, t in zip(self.cue_types, self.cue_axes, self._t):
-                        if ct == 'p':
-                            d_hat = d / torch.norm(d)
-                            t[:] = (t @ d_hat) * d_hat
-                #fi
+                self.use_cues(i)
 
                 if i == self.opt.warmup_until_iter:
                     print('')

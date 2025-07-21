@@ -511,6 +511,32 @@ def calculate_obb_pv(pointcloud: np.ndarray) -> tuple[np.ndarray, np.ndarray, np
     center = corner + center_proj @ directions
     return center, directions, extents
 
+def get_oriented_aabb(point_cloud, directions):
+    """
+    Calculates the Axis-Aligned Bounding Box of a point cloud with respect to a new set of axes.
+
+    Args:
+        point_cloud (np.ndarray): The (N, 3) point cloud.
+        directions (np.ndarray): A (3, 3) array where each row is a direction vector.
+                                 These vectors should ideally be orthonormal (unit vectors and mutually perpendicular).
+
+    Returns:
+        tuple: A tuple containing:
+            - np.ndarray: The min corner of the AABB in the new coordinate system.
+            - np.ndarray: The max corner of the AABB in the new coordinate system.
+    """
+    # Ensure directions are unit vectors for accurate projection
+    normalized_directions = directions / np.linalg.norm(directions, axis=1)[:, np.newaxis]
+
+    # Project the point cloud onto the new axes
+    # The result is an (N, 3) array where each column corresponds to projections on one of the direction vectors
+    projected_points = point_cloud @ normalized_directions.T
+
+    # Find the minimum and maximum projections along each new axis
+    min_projections = np.min(projected_points, axis=0)
+    max_projections = np.max(projected_points, axis=0)
+
+    return min_projections, max_projections
 
 def estimate_normals_o3d(points, radius_multiplier=3, max_nn=30):
     """
@@ -611,3 +637,142 @@ def find_close(x: np.ndarray, y: np.ndarray, threshold: float) -> np.ndarray:
     # We can get these indices directly from the boolean mask's 'where'.
     close_indices = np.where(valid_mask)[0]
     return close_indices
+
+def get_combined_aabb(
+    aabb1_min: torch.tensor,
+    aabb1_max: torch.tensor,
+    aabb2_min: torch.tensor,
+    aabb2_max: torch.tensor
+) -> tuple[torch.tensor, torch.tensor]:
+    # Find the element-wise minimum of the two min corners
+    combined_min = torch.min(aabb1_min, aabb2_min)
+    # Find the element-wise maximum of the two max corners
+    combined_max = torch.max(aabb1_max, aabb2_max)
+    return combined_min, combined_max
+
+def get_extended_aabb(
+    aabb_min_ext: torch.tensor, aabb_max_ext: torch.tensor,
+    aabb_min: torch.tensor, aabb_max: torch.tensor,
+    axes: torch.tensor, t: torch.tensor
+) -> tuple[torch.tensor, torch.tensor]:
+    t_proj = t @ axes.T
+    aabb_min_shift, aabb_max_shift = aabb_min + t_proj, aabb_max + t_proj
+    return get_combined_aabb(aabb_min_ext, aabb_max_ext, aabb_min_shift, aabb_max_shift)
+
+def shift_aabb_from_collision(
+    aabb1_ext: tuple[torch.tensor, torch.tensor],   # (min, max)
+    aabb2_ext: tuple[torch.tensor, torch.tensor],   # (min, max)
+    axes: torch.tensor, # (3, 3)
+    t1: torch.tensor,
+    t2: torch.tensor,
+) -> tuple[bool, int]:
+    def shift_aabb_from_collision_helper(
+        bb1: tuple[torch.tensor, torch.tensor],  # (min, max)
+        bb2: tuple[torch.tensor, torch.tensor],  # (min, max)
+        bases: torch.tensor, t1_: torch.tensor, t2_: torch.tensor
+    ) -> tuple[bool, int]:
+        has_intersection, min_axis_idx = find_minimum_penetration_axis(bb1[0], bb1[1], bb2[0], bb2[1])
+        if not has_intersection:
+            return False, -1
+        return True, min_axis_idx
+    #end function
+
+    return shift_aabb_from_collision_helper(aabb1_ext, aabb2_ext, axes, t2, t1)
+
+def find_minimum_penetration_axis(
+    aabb1_min: torch.Tensor,
+    aabb1_max: torch.Tensor,
+    aabb2_min: torch.Tensor,
+    aabb2_max: torch.Tensor,
+    eps: float=1e-4
+) -> tuple[bool, int]:
+    """
+    Judges if two AABBs intersect and returns the axis of minimum penetration.
+
+    Args:
+        aabb1_min (torch.Tensor): The min corner (x, y, z) of the first AABB.
+        aabb1_max (torch.Tensor): The max corner (x, y, z) of the first AABB.
+        aabb2_min (torch.Tensor): The min corner (x, y, z) of the second AABB.
+        aabb2_max (torch.Tensor): The max corner (x, y, z) of the second AABB.
+        eps (float): collision threshold
+
+    Returns:
+        tuple[bool, int]: A tuple containing:
+            - bool: True if the AABBs intersect, False otherwise.
+            - int: The index of the axis (0, 1, or 2) with the smallest overlap.
+                   Returns -1 if there is no intersection.
+    """
+    # 1. Check for intersection
+    # No intersection if there's a gap on any one axis
+    if torch.any(aabb1_max < aabb2_min - eps) or torch.any(aabb2_max < aabb1_min + eps):
+        return False, -1
+
+    # 2. Calculate penetration depths for each axis
+    penetrations = torch.min(aabb1_max, aabb2_max) - torch.max(aabb1_min, aabb2_min)
+
+    # 3. Find the axis with the minimum penetration and return its index
+    min_axis_idx = torch.argmin(penetrations).item()
+    return True, min_axis_idx
+
+def check_and_resolve_aabb_collision(
+    aabb1_min: torch.Tensor,
+    aabb1_max: torch.Tensor,
+    aabb2_min: torch.Tensor,
+    aabb2_max: torch.Tensor,
+    eps: float=1e-4
+) -> tuple[bool, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Checks for AABB intersection and resolves it by resizing each box along one edge.
+
+    Args:
+        aabb1_min/max: The min/max corners of the first AABB.
+        aabb2_min/max: The min/max corners of the second AABB.
+
+    Returns:
+        A tuple containing:
+        - bool: True if an intersection was found and resolved.
+        - torch.Tensor: Shift vector for aabb1_min.
+        - torch.Tensor: Shift vector for aabb1_max.
+        - torch.Tensor: Shift vector for aabb2_min.
+        - torch.Tensor: Shift vector for aabb2_max.
+    """
+    def resolve_aabb_collision_by_resizing(
+            bb1_min: torch.Tensor, bb1_max: torch.Tensor,
+            bb2_min: torch.Tensor, bb2_max: torch.Tensor
+    ) -> tuple[bool, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        intersected, min_axis_idx = find_minimum_penetration_axis(bb1_min, bb1_max, bb2_min, bb2_max, eps=0)
+
+        device = bb1_min.device
+        zero_vec = torch.zeros(3, device=device, dtype=bb1_min.dtype)
+
+        if not intersected:
+            return False, zero_vec, zero_vec, zero_vec, zero_vec
+
+        # 1. Calculate penetration depth and the amount each box needs to be resized
+        penetration_depth = (torch.min(bb1_max, bb2_max) - torch.max(bb1_min, bb2_min))[min_axis_idx]
+        shift_amount = penetration_depth / 2.0
+
+        # 2. Determine which faces are intersecting based on center positions
+        center1 = (bb1_min + bb1_max) / 2.0
+        center2 = (bb2_min + bb2_max) / 2.0
+
+        # 3. Initialize shift vectors for all four corners
+        shift_1_min, shift_1_max = zero_vec.clone(), zero_vec.clone()
+        shift_2_min, shift_2_max = zero_vec.clone(), zero_vec.clone()
+
+        if center1[min_axis_idx] < center2[min_axis_idx]:
+            # AABB1 is "left" of AABB2. Its right face (max) must move left.
+            shift_1_max[min_axis_idx] = -shift_amount
+            # AABB2 is "right" of AABB1. Its left face (min) must move right.
+            shift_2_min[min_axis_idx] = shift_amount
+        else:
+            # AABB1 is "right" of AABB2. Its left face (min) must move right.
+            shift_1_min[min_axis_idx] = shift_amount
+            # AABB2 is "left" of AABB1. Its right face (max) must move left.
+            shift_2_max[min_axis_idx] = -shift_amount
+
+        return True, shift_1_min, shift_1_max, shift_2_min, shift_2_max
+
+    aabb1_min_exp, aabb2_min_exp = aabb1_min - eps, aabb2_min - eps
+    aabb1_max_exp, aabb2_max_exp = aabb1_max + eps, aabb2_max + eps
+    return resolve_aabb_collision_by_resizing(aabb1_min_exp, aabb1_max_exp, aabb2_min_exp, aabb2_max_exp)

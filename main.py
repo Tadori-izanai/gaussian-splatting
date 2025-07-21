@@ -3,7 +3,7 @@ import torch
 
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, pca_on_pointcloud, \
-    calculate_obb_o3d, calculate_obb_pv, estimate_normals_o3d, estimate_normals_pv
+    calculate_obb_o3d, calculate_obb_pv, estimate_normals_o3d, estimate_normals_pv, get_oriented_aabb
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -92,7 +92,7 @@ def cluster_demo(out_path: str, data_path: str, num_movable: int, thr: int=-5):
         storePly(os.path.join(ply_path, f'clusters/points3d_{k}.ply'), pcd, np.zeros_like(pcd), normals)
     storePly(os.path.join(ply_path, f'points3d.ply'), x, np.zeros_like(x))
 
-def init_demo_from_dbscan(out_path, st_path, ed_path, num_movable: int):
+def part_init_demo(out_path, st_path, ed_path, num_movable: int):
     gaussians_st = get_gaussians(st_path, from_chk=True)
     gaussians_ed = get_gaussians(ed_path, from_chk=True)
     cd, cd_is, mpp = init_mpp(gaussians_st, gaussians_ed, thr=-4.5)
@@ -111,36 +111,44 @@ def init_demo_from_dbscan(out_path, st_path, ed_path, num_movable: int):
     np.save(os.path.join(out_path, 'sigma_init.npy'), sigma)
 
 def joint_init_demo(out_path: str, st_path: str, num_movable: int):
-    # pca_dir = os.path.join(out_path, 'clustering/pca_axes')
-    # obb_dir = os.path.join(out_path, 'clustering/obb_axes')
     nrm_dir = os.path.join(out_path, 'clustering/nrm_axes')
-    dirs_dir = os.path.join(out_path, 'clustering/axis_dirs')
     gaussians_dir = os.path.join(out_path, 'clustering/axes_gaussians')
-    # os.makedirs(pca_dir, exist_ok=True)
-    # os.makedirs(obb_dir, exist_ok=True)
     os.makedirs(nrm_dir, exist_ok=True)
-    os.makedirs(dirs_dir, exist_ok=True)
     os.makedirs(gaussians_dir, exist_ok=True)
 
     parts, nms = list_of_clusters(os.path.join(out_path, 'clustering/clusters'), num_movable, ret_normal=True)
     mu = np.load(os.path.join(out_path, 'mu_init.npy'))
+
+    from cues import cues
+    types = cues[out_path]['joint_types']
+    prismatic_nms = [n for n, t in zip(nms, types) if t == 'p']
+    dirs_p = np.zeros((3, 3))
+    if len(prismatic_nms) > 0:
+        dirs_p = estimate_principal_directions(np.concatenate(prismatic_nms, axis=0), ort='gs')
+    np.save(os.path.join(out_path, f'clustering/axes_p.npy'), dirs_p)
+
+    axes = []
+    aabbs_min, aabbs_max = [], []
     for k, pcd in enumerate(parts):
-        # _, pca_dirs, _ = pca_on_pointcloud(pcd)
-        # _, obb_dirs, _ = calculate_obb_pv(pcd)
-        nrm_dirs = estimate_principal_directions(nms[k], ort='gs')
         o = np.zeros(3)
+        dirs = dirs_p if (types[k] == 'p') else estimate_principal_directions(nms[k], ort='gs')
         for i in np.arange(3):
-            # save_axis_mesh(pca_dirs[i], o, os.path.join(pca_dir, f'axis{k}_{i}.ply'), mu[k])
-            # save_axis_mesh(obb_dirs[i], o, os.path.join(obb_dir, f'axis{k}_{i}.ply'), mu[k])
-            d = np.sign(mu[k]) * np.abs(nrm_dirs[i])  # reduce occlusion
+            d = -dirs[i] if (dirs[i] @ mu[k] < 0) else dirs[i]
             save_axis_mesh(d, o, os.path.join(nrm_dir, f'axis{k}_{i}.ply'), mu[k])
             save_axis_mesh(d, o, os.path.join(gaussians_dir, f'axis{k}_{i}.ply'), mu[k],
                            to_gaussians=True, c=COLORS[i])
-        np.save(os.path.join(dirs_dir, f'axes_{k}.npy'), nrm_dirs)
+        axes.append(dirs)
+        min_projections, max_projections = get_oriented_aabb(pcd, dirs)
+        aabbs_min.append(min_projections)
+        aabbs_max.append(max_projections)
         print('done with axis', k)
+    np.save(os.path.join(out_path, f'clustering/axes.npy'), axes)
+    np.save(os.path.join(out_path, f'clustering/aabbs_min.npy'), aabbs_min)
+    np.save(os.path.join(out_path, f'clustering/aabbs_max.npy'), aabbs_max)
+
     put_axes(out_path, st_path, num_movable)
 
-def gmm_am_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int, thr=0.85):
+def art_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int, thr=0.85):
     torch.autograd.set_detect_anomaly(False)
     gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
     gaussians_ed = get_gaussians(ed_path, from_chk=True).cancel_grads()
@@ -194,7 +202,7 @@ def vis_axes_pp_demo(out_path: str, st_path: str):
         rgb[(part_indices == k) & mask] = np.array(COLORS[k % len(COLORS)]) * 255
     storePly(os.path.join(ply_path, 'seg.ply'), xyz, rgb)
 
-def mp_joint_optimization_demo(out_path: str, st_path: str, data_path: str, num_movable: int):
+def refinement_demo(out_path: str, st_path: str, data_path: str, num_movable: int):
     torch.autograd.set_detect_anomaly(False)
 
     gaussians_st = get_gaussians(st_path, from_chk=True)
@@ -322,12 +330,12 @@ if __name__ == '__main__':
         # out = 'output/artgs/oven'
         # rev = False
 
-        K = 3
-        st = 'output/artgs/tbl3_st'
-        ed = 'output/artgs/tbl3_ed'
-        data = 'data/artgs/table_25493'
-        out = 'output/artgs/tbl3'
-        rev = True
+        # K = 3
+        # st = 'output/artgs/tbl3_st'
+        # ed = 'output/artgs/tbl3_ed'
+        # data = 'data/artgs/table_25493'
+        # out = 'output/artgs/tbl3'
+        # rev = True
 
         # K = 3
         # st = 'output/artgs/sto3_st'
@@ -413,14 +421,14 @@ if __name__ == '__main__':
     # exit(0)
 
     # cluster_demo(out, data, K, thr=cd_thr)
-    # init_demo_from_dbscan(out, st, ed, K)
+    # part_init_demo(out, st, ed, K)
     # joint_init_demo(out, st, K)
     # exit(0)
 
     get_gt_motion_params(data, reverse=rev)
 
-    gmm_am_optim_demo(out, st, ed, data, num_movable=K)
-    # mp_joint_optimization_demo(out, st, data, num_movable=K)
+    # art_optim_demo(out, st, ed, data, num_movable=K)
+    # refinement_demo(out, st, data, num_movable=K)
     eval_demo(out, data, num_movable=K, reverse=rev)
     vis_axes_pp_demo(out, st)
 
