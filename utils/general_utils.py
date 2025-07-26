@@ -27,6 +27,7 @@ from pytorch3d.structures import Meshes
 from sklearn.decomposition import PCA
 import open3d as o3d
 import pyvista as pv
+from sklearn.cluster import KMeans
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -445,6 +446,76 @@ def sample_points_from_ply(file_path: str, n_samples: int=100_000) -> np.ndarray
     pts = sample_points_from_meshes(mesh, num_samples=n_samples).squeeze(0)
     return pts.cpu().numpy()
 
+def estimate_principal_directions(normals: np.ndarray, ort: str='qr', k: int=3) -> np.ndarray:
+    """
+        Estimate three orthogonal directions from normals, treating opposite directions as equivalent.
+
+        Args:
+            normals: np.ndarray of shape (N, 3), unit normals.
+            k: int, number of clusters (default 3).
+            ort: str, 'qr' for QR decomposition or 'gs' for Gram-Schmidt.
+
+        Returns:
+            directions: np.ndarray of shape (3, 3), where each row is a direction.
+        """
+    # Normalize normals
+    normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+
+    # Map to first octant
+    normals_abs = np.abs(normals)
+
+    # Cluster normals
+    kmeans = KMeans(n_clusters=k, random_state=0).fit(normals_abs)
+    labels = kmeans.labels_
+
+    # Sort clusters by size
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    sort_indices = np.argsort(counts)[::-1]
+    top_k_labels = unique_labels[sort_indices][:k]
+
+    # Compute mean directions, ordered by cluster size
+    directions = np.zeros((k, 3))
+    #
+    # for i, label in enumerate(top_k_labels):
+    #     cluster_normals = normals[labels == label]
+    #     if len(cluster_normals) == 0:
+    #         raise ValueError(f"Cluster {label} is empty.")
+    #     mean_dir = np.mean(cluster_normals, axis=0)
+    #     mean_dir = mean_dir / np.linalg.norm(mean_dir)
+    #     directions[i] = mean_dir
+    #
+    for i, label in enumerate(top_k_labels):
+        cluster_normals = normals[labels == label]
+        if len(cluster_normals) < 1:  # A cluster could be empty
+            continue  # Or handle as an error
+
+        # Correct way: Use PCA (SVD) to find the principal direction
+        # The principal direction is the eigenvector of the covariance matrix
+        # corresponding to the largest eigenvalue.
+        covariance_matrix = np.dot(cluster_normals.T, cluster_normals)
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance_matrix)
+
+        # The principal direction is the eigenvector with the largest eigenvalue.
+        # np.linalg.eigh sorts eigenvalues in ascending order, so we take the last eigenvector.
+        principal_direction = eigenvectors[:, -1]
+        directions[i] = principal_direction / np.linalg.norm(principal_direction)
+
+    # Orthogonalize
+    if ort == 'gs':
+        def gram_schmidt(vectors):
+            u = np.zeros_like(vectors)
+            u[0] = vectors[0] / np.linalg.norm(vectors[0])
+            u[1] = vectors[1] - np.dot(vectors[1], u[0]) * u[0]
+            u[1] = u[1] / np.linalg.norm(u[1])
+            u[2] = vectors[2] - np.dot(vectors[2], u[0]) * u[0] - np.dot(vectors[2], u[1]) * u[1]
+            u[2] = u[2] / np.linalg.norm(u[2])
+            return u
+        directions = gram_schmidt(directions)
+    else:  # Default to QR
+        directions, _ = np.linalg.qr(directions)
+
+    return directions
+
 def pca_on_pointcloud(pointcloud):
     """
     Perform PCA on a point cloud to derive the three main directions.
@@ -537,6 +608,37 @@ def get_oriented_aabb(point_cloud, directions):
     max_projections = np.max(projected_points, axis=0)
 
     return min_projections, max_projections
+
+def get_bounding_box(point_cloud: np.ndarray, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Calculates the Oriented Bounding Box (OBB) for a point cloud given specific axes.
+
+    Args:
+        point_cloud (np.ndarray): The (N, 3) point cloud data.
+        directions (np.ndarray): A (3, 3) array where each row is a direction vector for the OBB's axes.
+                                 These directions should be orthonormal.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: A tuple containing:
+            - np.ndarray: The (3,) center of the OBB in world coordinates.
+            - np.ndarray: The (3,) extents (half-lengths) of the OBB along each direction.
+    """
+    # 1. Project the point cloud onto the given directions
+    # The result is an (N, 3) array of the points' coordinates in the new axis system
+    projected_points = point_cloud @ directions.T
+
+    # 2. Find the minimum and maximum projections along each new axis
+    min_projections = np.min(projected_points, axis=0)
+    max_projections = np.max(projected_points, axis=0)
+
+    # 3. Calculate the center and extents in the local coordinate system
+    local_center = (min_projections + max_projections) / 2.0
+    extents = (max_projections - min_projections) / 2.0
+
+    # 4. Transform the local center back to world coordinates
+    # This is a linear combination of the direction vectors
+    world_center = local_center @ directions
+    return world_center, extents
 
 def estimate_normals_o3d(points, radius_multiplier=3, max_nn=30):
     """
@@ -657,7 +759,8 @@ def get_extended_aabb(
 ) -> tuple[torch.tensor, torch.tensor]:
     t_proj = t @ axes.T
     aabb_min_shift, aabb_max_shift = aabb_min + t_proj, aabb_max + t_proj
-    return get_combined_aabb(aabb_min_ext, aabb_max_ext, aabb_min_shift, aabb_max_shift)
+    # return get_combined_aabb(aabb_min_ext, aabb_max_ext, aabb_min_shift, aabb_max_shift)
+    return aabb_min_shift, aabb_max_shift
 
 def shift_aabb_from_collision(
     aabb1_ext: tuple[torch.tensor, torch.tensor],   # (min, max)
@@ -776,3 +879,141 @@ def check_and_resolve_aabb_collision(
     aabb1_min_exp, aabb2_min_exp = aabb1_min - eps, aabb2_min - eps
     aabb1_max_exp, aabb2_max_exp = aabb1_max + eps, aabb2_max + eps
     return resolve_aabb_collision_by_resizing(aabb1_min_exp, aabb1_max_exp, aabb2_min_exp, aabb2_max_exp)
+
+def get_bb_collision_axis(
+        center1: np.ndarray, extents1: np.ndarray, directions1: np.ndarray,
+        center2: np.ndarray, extents2: np.ndarray, directions2: np.ndarray
+) -> tuple[bool, int, int]:
+    """
+    Checks if two OBBs intersect and, if so, finds the index of the axis
+    from BB1 that provides the minimum separation distance.
+
+    Args:
+        center1, extents1, directions1: Properties of the first bounding box (BB1).
+        center2, extents2, directions2: Properties of the second bounding box (BB2).
+
+    Returns:
+        A tuple containing:
+        - bool: True if the boxes intersect, False otherwise.
+        - int: The index (0, 1, or 2) of the best separation axis from BB1,
+               or -1 if there is no intersection.
+    """
+    T = center2 - center1
+
+    axes_to_test = [
+        directions1[0], directions1[1], directions1[2],
+        directions2[0], directions2[1], directions2[2],
+        np.cross(directions1[0], directions2[0]), np.cross(directions1[0], directions2[1]),
+        np.cross(directions1[0], directions2[2]), np.cross(directions1[1], directions2[0]),
+        np.cross(directions1[1], directions2[1]), np.cross(directions1[1], directions2[2]),
+        np.cross(directions1[2], directions2[0]), np.cross(directions1[2], directions2[1]),
+        np.cross(directions1[2], directions2[2]),
+    ]
+
+    for L in axes_to_test:
+        # Check if the axis is a zero vector (more robustly than L==0)
+        if np.dot(L, L) < 1e-8:
+            continue
+        r1 = np.sum(extents1 * np.abs(directions1 @ L))
+        r2 = np.sum(extents2 * np.abs(directions2 @ L))
+        center_dist_proj = np.abs(T @ L)
+
+        if center_dist_proj > r1 + r2:
+            return False, -1, -1  # No intersection
+
+    def _find_min_penetration_axis(axes_to_check: np.ndarray) -> int:
+        """Finds the axis with the minimum penetration from a given set."""
+        min_pen, best_idx = float('inf'), -1
+        for i, ll in enumerate(axes_to_check):
+            # Project radii of both boxes onto the axis ll
+            _r1 = np.sum(extents1 * np.abs(directions1 @ ll))
+            _r2 = np.sum(extents2 * np.abs(directions2 @ ll))
+            # Calculate penetration depth
+            penetration = (_r1 + _r2) - np.abs(T @ ll)
+            if penetration < min_pen:
+                min_pen = penetration
+                best_idx = i
+        return best_idx
+
+    best_idx1 = _find_min_penetration_axis(directions1)
+    best_idx2 = _find_min_penetration_axis(directions2)
+    return True, best_idx1, best_idx2
+
+def get_bb_collision_axis_torch(
+    center1: torch.Tensor, extents1: torch.Tensor, directions1: torch.Tensor,
+    center2: torch.Tensor, extents2: torch.Tensor, directions2: torch.Tensor,
+) -> tuple[bool, int, int]:
+    T = center2 - center1
+
+    axes_to_test = [
+        directions1[0], directions1[1], directions1[2],
+        directions2[0], directions2[1], directions2[2],
+        torch.cross(directions1[0], directions2[0]), torch.cross(directions1[0], directions2[1]),
+        torch.cross(directions1[0], directions2[2]), torch.cross(directions1[1], directions2[0]),
+        torch.cross(directions1[1], directions2[1]), torch.cross(directions1[1], directions2[2]),
+        torch.cross(directions1[2], directions2[0]), torch.cross(directions1[2], directions2[1]),
+        torch.cross(directions1[2], directions2[2]),
+    ]
+
+    for L in axes_to_test:
+        # Check if the axis is a zero vector (more robustly than L==0)
+        if L @ L < 1e-8:
+            continue
+        r1 = torch.sum(extents1 * torch.abs(directions1 @ L))
+        r2 = torch.sum(extents2 * torch.abs(directions2 @ L))
+        center_dist_proj = torch.abs(T @ L)
+
+        if center_dist_proj > r1 + r2:
+            return False, -1, -1  # No intersection
+
+    def _find_min_penetration_axis(axes_to_check: torch.tensor) -> int:
+        """Finds the axis with the minimum penetration from a given set."""
+        min_pen, best_idx = float('inf'), -1
+        for i, ll in enumerate(axes_to_check):
+            # Project radii of both boxes onto the axis ll
+            _r1 = torch.sum(extents1 * torch.abs(directions1 @ ll))
+            _r2 = torch.sum(extents2 * torch.abs(directions2 @ ll))
+            # Calculate penetration depth
+            penetration = (_r1 + _r2) - torch.abs(T @ ll)
+            if penetration < min_pen:
+                min_pen = penetration
+                best_idx = i
+        return best_idx
+
+    best_idx1 = _find_min_penetration_axis(directions1)
+    best_idx2 = _find_min_penetration_axis(directions2)
+    return True, best_idx1, best_idx2
+
+def find_and_unify_orthogonal(matrices: np.ndarray, threshold: float=3) -> np.ndarray:
+    n_matrices = matrices.shape[0]
+
+    distances = np.zeros((n_matrices, n_matrices))
+    for i in np.arange(n_matrices):
+        for j in np.arange(i, n_matrices):
+            dots = np.clip(matrices[i] @ matrices[j].T, -1.0, 1.0)
+            angles_mean = np.mean(
+                np.rad2deg(
+                    np.acos(np.abs(dots).max(axis=1))
+                )
+            )
+            distances[i, j] = angles_mean
+            distances[j, i] = angles_mean
+    print((distances < threshold).astype('int'))
+
+    neighbor_counts = np.sum(distances < threshold, axis=1)
+    if np.all(neighbor_counts <= 1):  # Handle case with no clusters
+        return
+
+    ref_idx = np.argmax(neighbor_counts)
+    q_ref = matrices[ref_idx]
+
+    # The cluster includes all matrices close to the reference matrix
+    cluster_indices = np.where(distances[ref_idx] < threshold)[0]
+    cluster_matrices = matrices[cluster_indices]
+
+    normals = cluster_matrices.reshape(-1, 3)
+    unified = estimate_principal_directions(normals, ort='gs')
+    matrices[cluster_indices] = unified
+    print(unified)
+    print()
+    return distances < threshold

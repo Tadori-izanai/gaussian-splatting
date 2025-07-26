@@ -3,7 +3,8 @@ import torch
 
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, pca_on_pointcloud, \
-    calculate_obb_o3d, calculate_obb_pv, estimate_normals_o3d, estimate_normals_pv, get_oriented_aabb
+    calculate_obb_o3d, calculate_obb_pv, estimate_normals_o3d, estimate_normals_pv, get_oriented_aabb, \
+    get_bounding_box
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -12,22 +13,21 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 import json
-import matplotlib.pyplot as plt
 import numpy as np
 from pytorch3d.loss import chamfer_distance
 from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
 
 from arguments import get_default_args
-from utils.general_utils import eval_quad, inverse_sigmoid, value_to_rgb
+from utils.general_utils import eval_quad, inverse_sigmoid, value_to_rgb, estimate_principal_directions, \
+    find_and_unify_orthogonal
 from scene.multipart_models import MPArtModelJoint, GMMArtModel, COLORS
-from scene.deformable_model import DeformationModel, DMCanonical, DMGauFRe
 from scene.dataset_readers import fetchPly, storePly
 
 from main_utils import train_single, get_gaussians, print_motion_params, plot_hist, \
     mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, eval_init_gmm_params, \
     modify_scaling, get_vis_mask, estimate_se3, eval_mu_sigma, save_axis_mesh, list_of_clusters, \
-    estimate_principal_directions, put_axes
+    put_axes
 from metric_utils import get_gt_motion_params, interpret_transforms, eval_axis_metrics, \
     get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics
 
@@ -119,32 +119,38 @@ def joint_init_demo(out_path: str, st_path: str, num_movable: int):
     parts, nms = list_of_clusters(os.path.join(out_path, 'clustering/clusters'), num_movable, ret_normal=True)
     mu = np.load(os.path.join(out_path, 'mu_init.npy'))
 
-    from cues import cues
-    types = cues[out_path]['joint_types']
-    prismatic_nms = [n for n, t in zip(nms, types) if t == 'p']
-    dirs_p = np.zeros((3, 3))
-    if len(prismatic_nms) > 0:
-        dirs_p = estimate_principal_directions(np.concatenate(prismatic_nms, axis=0), ort='gs')
-    np.save(os.path.join(out_path, f'clustering/axes_p.npy'), dirs_p)
+    # from cues import cues
+    # types = cues[out_path]['joint_types']
+    # prismatic_nms = [n for n, t in zip(nms, types) if t == 'p']
+    # dirs_p = np.zeros((3, 3))
+    # if len(prismatic_nms) > 0:
+    #     dirs_p = estimate_principal_directions(np.concatenate(prismatic_nms, axis=0), ort='gs')
+    # np.save(os.path.join(out_path, f'clustering/axes_p.npy'), dirs_p)
 
-    axes = []
-    aabbs_min, aabbs_max = [], []
+    axes = np.zeros((num_movable, 3, 3))
+    for k, nm in enumerate(nms):
+        axes[k] = estimate_principal_directions(nm, ort='gs')
+    neighbors = find_and_unify_orthogonal(axes)
+
+    bb_centers, bb_extents = [], []
     for k, pcd in enumerate(parts):
         o = np.zeros(3)
-        dirs = dirs_p if (types[k] == 'p') else estimate_principal_directions(nms[k], ort='gs')
+        # dirs = dirs_p if (types[k] == 'p') else estimate_principal_directions(nms[k], ort='gs')
+        dirs = axes[k]
         for i in np.arange(3):
             d = -dirs[i] if (dirs[i] @ mu[k] < 0) else dirs[i]
             save_axis_mesh(d, o, os.path.join(nrm_dir, f'axis{k}_{i}.ply'), mu[k])
             save_axis_mesh(d, o, os.path.join(gaussians_dir, f'axis{k}_{i}.ply'), mu[k],
                            to_gaussians=True, c=COLORS[i])
-        axes.append(dirs)
-        min_projections, max_projections = get_oriented_aabb(pcd, dirs)
-        aabbs_min.append(min_projections)
-        aabbs_max.append(max_projections)
+        # axes.append(dirs)
+        centers, extents = get_bounding_box(pcd, dirs)
+        bb_centers.append(centers)
+        bb_extents.append(extents)
         print('done with axis', k)
     np.save(os.path.join(out_path, f'clustering/axes.npy'), axes)
-    np.save(os.path.join(out_path, f'clustering/aabbs_min.npy'), aabbs_min)
-    np.save(os.path.join(out_path, f'clustering/aabbs_max.npy'), aabbs_max)
+    np.save(os.path.join(out_path, f'clustering/bb_centers.npy'), bb_centers)
+    np.save(os.path.join(out_path, f'clustering/bb_extents.npy'), bb_extents)
+    np.save(os.path.join(out_path, f'clustering/neighbors.npy'), neighbors)
 
     put_axes(out_path, st_path, num_movable)
 
@@ -156,8 +162,7 @@ def art_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str, nu
     am = GMMArtModel(gaussians_st, num_movable, new_scheme=False)
     am.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path, thr=cd_thr)
     am.set_init_params(out_path, scaling_modifier=1)
-    am.set_cues(out_path)
-    # am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_9/point_cloud.ply'))
+    # am.set_init_params(out_path, scaling_modifier=1, use_priors=True)
     am.save_all_vis(-10)
     t, r = am.train(gt_gaussians=gaussians_ed)
 
@@ -422,12 +427,12 @@ if __name__ == '__main__':
 
     # cluster_demo(out, data, K, thr=cd_thr)
     # part_init_demo(out, st, ed, K)
-    # joint_init_demo(out, st, K)
+    joint_init_demo(out, st, K)
     # exit(0)
 
     get_gt_motion_params(data, reverse=rev)
 
-    # art_optim_demo(out, st, ed, data, num_movable=K)
+    art_optim_demo(out, st, ed, data, num_movable=K)
     # refinement_demo(out, st, data, num_movable=K)
     eval_demo(out, data, num_movable=K, reverse=rev)
     vis_axes_pp_demo(out, st)

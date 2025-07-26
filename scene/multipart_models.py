@@ -26,7 +26,7 @@ from scene.dataset_readers import fetchPly, storePly
 from utils.general_utils import quat_mult, mat2quat, inverse_sigmoid, inverse_softmax, \
     strip_symmetric, build_scaling_rotation, eval_quad, decompose_covariance_matrix, build_rotation, \
     find_close, find_files_with_suffix, kl_divergence_gaussian, value_to_rgb, shift_aabb_from_collision, \
-    get_extended_aabb
+    get_extended_aabb, get_bb_collision_axis, get_bb_collision_axis_torch
 from utils.loss_utils import eval_losses, eval_img_loss, eval_cd_loss, show_losses, eval_cd_loss_sd, \
     eval_knn_opacities_collision_loss, eval_opacity_bce_loss, eval_depth_loss, sample_pts
 from utils.system_utils import mkdir_p
@@ -70,6 +70,7 @@ class MPArtModelBasic:
         self.opt.t_lr = 0.00005
 
         self.opt.trace_r_thresh = 1 + 2 * math.cos(5 / 180 * math.pi)
+        self.opt.trace_r_thresh_tight = 1 + 2 * math.cos(.1 / 180 * math.pi)
 
     def __init__(self, gaussians: GaussianModel, num_movable: int):
         self.num_movable = num_movable
@@ -253,6 +254,13 @@ class GMMArtModel(MPArtModelBasic):
         self.aabbs_min_ext, self.aabbs_max_ext = None, None
         self.collisions = set()
 
+        self.bb_axes = None
+        self.bb_centers = None
+        self.bb_extents = None
+        self.bb_axes_deformed = None
+        self.bb_centers_deformed = None
+        self.neighbors_mat = None
+
         def build_inverse_covariance_from_scaling_rotation(scaling, rot_col1, rot_col2):
             ss = torch.diag_embed(1 / (scaling + 1e-8))
             rr = torch.ones(self.num_movable, 3, 3, dtype=rot_col1.dtype, device=rot_col1.device)
@@ -397,7 +405,7 @@ class GMMArtModel(MPArtModelBasic):
             _, indices, _ = knn_points(p1, p2, K=1)
             self.pcd_knn_indices.append(indices.flatten())
 
-    def set_cues(self, out_path: str, ):
+    def _set_cues(self, out_path: str, ):
         dirs_path = os.path.join(out_path, 'clustering')
 
         from cues import cues
@@ -439,6 +447,24 @@ class GMMArtModel(MPArtModelBasic):
         self.aabbs_min_ext = [t.clone().detach() for t in self.aabbs_min]
         self.aabbs_max_ext = [t.clone().detach() for t in self.aabbs_max]
 
+    def _set_bbs(self, out_path: str):
+        dirs_path = os.path.join(out_path, 'clustering')
+        axes = np.load(os.path.join(dirs_path, 'axes.npy'))
+        bb_centers = np.load(os.path.join(dirs_path, 'bb_centers.npy'))
+        bb_extents = np.load(os.path.join(dirs_path, 'bb_extents.npy'))
+        self.neighbors_mat = np.load(os.path.join(dirs_path, 'neighbors.npy'))
+
+        self.bb_axes = []
+        self.bb_centers = []
+        self.bb_extents = []
+        for k in np.arange(self.num_movable):
+            self.bb_centers.append(torch.tensor(bb_centers[k], dtype=torch.float, device='cuda'))
+            self.bb_extents.append(torch.tensor(bb_extents[k], dtype=torch.float, device='cuda'))
+            axes[k] /= np.linalg.norm(axes[k], axis=1, keepdims=True)
+            self.bb_axes.append(torch.tensor(axes[k], dtype=torch.float, device='cuda'))
+
+        self.bb_axes_deformed = [t.clone().detach() for t in self.bb_axes]
+        self.bb_centers_deformed = [t.clone().detach() for t in self.bb_centers]
 
     def _set_init_probabilities(self, prob=None, mu=None, sigma=None, scaling_modifier=1.0, eps=1e-6):
         if prob is not None:
@@ -454,7 +480,7 @@ class GMMArtModel(MPArtModelBasic):
             self._rotation_col1 = rotation[:, :, 0].clone().detach().to('cuda').requires_grad_(True)
             self._rotation_col2 = rotation[:, :, 1].clone().detach().to('cuda').requires_grad_(True)
 
-    def set_init_params(self, model_path: str, scaling_modifier=1.0):
+    def set_init_params(self, model_path: str, scaling_modifier=1.0, use_priors=False, use_cues=False):
         prob = torch.tensor(np.load(os.path.join(model_path, 'mpp_init.npy')), device='cuda')
         mu = torch.tensor(np.load(os.path.join(model_path, 'mu_init.npy')), device='cuda')
         sigma = torch.tensor(np.load(os.path.join(model_path, 'sigma_init.npy')), device='cuda')
@@ -463,6 +489,10 @@ class GMMArtModel(MPArtModelBasic):
             nn.Parameter(torch.tensor(c, dtype=torch.float, device='cuda').requires_grad_(True))
             for c in mu
         ]
+        if use_cues:
+            self._set_cues(model_path)
+        if use_priors:
+            self._set_bbs(model_path)
 
     def _get_slot_deform(self):
         qrs = []
@@ -631,11 +661,16 @@ class GMMArtModel(MPArtModelBasic):
             if loss is not None:
                 loss_msg += f"  {name} {loss.item():.{7}f}"
         print(loss_msg)
+
         for k in np.arange(self.num_movable):
             print(f't{k}:', self.get_t[k].detach().cpu().numpy())
-            if self.cue_types is None or self.cue_types[k] == 'r':
+            # if self.cue_types is None or self.cue_types[k] == 'r':
+            if torch.abs(torch.trace(self.get_r[k])) < self.opt.trace_r_thresh_tight: # revolute
                 print(f'r{k}:', self.get_r[k].detach().cpu().numpy())
-                print(f'_c{k}, _t{k}:', self._c[k].detach().cpu().numpy(), self._t[k].detach().cpu().numpy())
+                # print(f'_c{k}, _t{k}:', self._c[k].detach().cpu().numpy(), self._t[k].detach().cpu().numpy())
+            else:
+                print(f'r{k}: IDENTITY')
+
         print('cd_weight:', self.opt.cd_weight)
         print('collisions:', self.collisions)
         print()
@@ -839,7 +874,16 @@ class GMMArtModel(MPArtModelBasic):
                             print(f't{k2}:', self._t[k2].tolist())
                             self.collisions.add((k1, idx))
                             self.collisions.add((k2, idx))
-                            print(self.collisions, '\n')
+                            print(self.collisions)
+
+                            for k in [k1, k2]:
+                                if torch.abs(torch.trace(self.get_r[k])) < self.opt.trace_r_thresh_tight:
+                                    print(f'r{k}:', self.get_r[k].detach().cpu().numpy())
+                                self._column_vec1[k].requires_grad_(False)
+                                self._column_vec2[k].requires_grad_(False)
+                                self._column_vec1[k][:] = torch.tensor([1., 0., 0.])
+                                self._column_vec2[k][:] = torch.tensor([0., 1., 0.])
+                            print()
 
             # extends AABBs
             for k in range(self.num_movable):
@@ -849,6 +893,61 @@ class GMMArtModel(MPArtModelBasic):
                         self.cue_axes_all[k], self._t[k]
                     )
         # fi
+
+    def use_priors(self, iteration: int):
+        if iteration > self.opt.cue_iters or self.bb_axes is None:
+            return
+
+        # restricts movement
+        for k, idx in self.collisions:
+            proj_t = self._t[k] @ self.bb_axes[k].T
+            proj_t[idx] = 0
+            self._t[k][:] = proj_t @ self.bb_axes[k]
+
+        # deform BBs
+        r, t = self.get_r, self.get_t
+        for k in range(self.num_movable):
+            self.bb_centers_deformed[k] = self.bb_centers[k] @ r[k] + t[k]
+            self.bb_axes_deformed[k] = self.bb_axes[k] @ r[k]
+
+        # detects collision
+        for k1 in range(self.num_movable):
+            for k2 in range(k1 + 1, self.num_movable):
+                if not self.neighbors_mat[k1, k2]:
+                    continue
+
+                has_collision, idx1, idx2 = get_bb_collision_axis_torch(
+                    self.bb_centers_deformed[k1], self.bb_extents[k1], self.bb_axes_deformed[k1],
+                    self.bb_centers_deformed[k2], self.bb_extents[k2], self.bb_axes_deformed[k2],
+                )
+
+                if not has_collision or (
+                    has_collision and ((k1, idx1) in self.collisions) and ((k2, idx2) in self.collisions)
+                ):
+                    continue
+                print('collision:')
+                print(f't{k1}:', self._t[k1].tolist())
+                print(f't{k2}:', self._t[k2].tolist())
+                print(f'r{k1}:', self.get_r[k1].detach().cpu().numpy())
+                print(f'r{k2}:', self.get_r[k2].detach().cpu().numpy())
+                print(self.collisions)
+                print()
+
+                for k, idx in zip([k1, k2], [idx1, idx2]):
+                    if (k, idx) in self.collisions:
+                        continue
+
+                    # does not rotate much
+                    if torch.abs(torch.trace(self.get_r[k])) > self.opt.trace_r_thresh_tight:
+                        self.collisions.add((k, idx))
+
+                    self._column_vec1[k].requires_grad_(False)
+                    self._column_vec2[k].requires_grad_(False)
+                    self._column_vec1[k][:] = torch.tensor([1., 0., 0.])
+                    self._column_vec2[k][:] = torch.tensor([0., 1., 0.])
+            #end k2 loop
+        #end k1 loop
+        return
 
     @override
     def train(self, gt_gaussians):
@@ -903,6 +1002,7 @@ class GMMArtModel(MPArtModelBasic):
                     self.ppp = None
 
                 self.use_cues(i)
+                self.use_priors(i)
 
                 if i == self.opt.warmup_until_iter:
                     print('')

@@ -3,7 +3,6 @@ import torch
 from gaussian_renderer import render, network_gui
 from scene import Scene, GaussianModel
 from tqdm import tqdm
-from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
 import open3d as o3d
@@ -17,7 +16,6 @@ from utils.loss_utils import eval_losses, show_losses, eval_img_loss, eval_opaci
 from scene import BWScenes
 from scene.gaussian_model import GaussianModel
 from scene.dataset_readers import readCamerasFromTransforms, fetchPly
-from scene.multipart_models import GMMArtModel
 from utils.general_utils import get_per_point_cd, otsu_with_peak_filtering, inverse_sigmoid, \
     decompose_covariance_matrix, rotation_matrix_from_axis_angle, eval_quad, knn, mat2quat, quat_mult
 from utils.graphics_utils import getProjectionMatrix, getWorld2View
@@ -337,59 +335,6 @@ def put_axes(out_path, st_path, num_movable: int):
         obj_with_axes = gaussians_st + axis0 + axis1 + axis2
         obj_with_axes.save_ply(os.path.join(out_path, f'point_cloud/iteration_-{k + 100}/point_cloud.ply'))
     return
-
-def estimate_principal_directions(normals: np.ndarray, ort: str='qr', k: int=3) -> np.ndarray:
-    """
-        Estimate three orthogonal directions from normals, treating opposite directions as equivalent.
-
-        Args:
-            normals: np.ndarray of shape (N, 3), unit normals.
-            k: int, number of clusters (default 3).
-            ort: str, 'qr' for QR decomposition or 'gs' for Gram-Schmidt.
-
-        Returns:
-            directions: np.ndarray of shape (3, 3), where each row is a direction.
-        """
-    # Normalize normals
-    normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
-
-    # Map to first octant
-    normals_abs = np.abs(normals)
-
-    # Cluster normals
-    kmeans = KMeans(n_clusters=k, random_state=0).fit(normals_abs)
-    labels = kmeans.labels_
-
-    # Sort clusters by size
-    unique_labels, counts = np.unique(labels, return_counts=True)
-    sort_indices = np.argsort(counts)[::-1]
-    top_k_labels = unique_labels[sort_indices][:k]
-
-    # Compute mean directions, ordered by cluster size
-    directions = np.zeros((k, 3))
-    for i, label in enumerate(top_k_labels):
-        cluster_normals = normals[labels == label]
-        if len(cluster_normals) == 0:
-            raise ValueError(f"Cluster {label} is empty.")
-        mean_dir = np.mean(cluster_normals, axis=0)
-        mean_dir = mean_dir / np.linalg.norm(mean_dir)
-        directions[i] = mean_dir
-
-    # Orthogonalize
-    if ort == 'gs':
-        def gram_schmidt(vectors):
-            u = np.zeros_like(vectors)
-            u[0] = vectors[0] / np.linalg.norm(vectors[0])
-            u[1] = vectors[1] - np.dot(vectors[1], u[0]) * u[0]
-            u[1] = u[1] / np.linalg.norm(u[1])
-            u[2] = vectors[2] - np.dot(vectors[2], u[0]) * u[0] - np.dot(vectors[2], u[1]) * u[1]
-            u[2] = u[2] / np.linalg.norm(u[2])
-            return u
-        directions = gram_schmidt(directions)
-    else:  # Default to QR
-        directions, _ = np.linalg.qr(directions)
-
-    return directions
 
 if __name__ == '__main__':
     arrow_path = 'output/zarrow/mesh.ply'
