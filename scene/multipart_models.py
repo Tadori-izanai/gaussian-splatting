@@ -1197,14 +1197,10 @@ class MPArtModelJoint(MPArtModelBasic):
             loss = weight_st * losses['app_st'] + (1 - weight_st) * losses['app_ed']
 
             if (self.opt.collision_weight is not None) and requires_collision:
-                # losses['collision'] = 0
-                # for k in range(self.num_movable):
-                #     msk = self.mask & (self.part_indices == k)
-                #     losses['collision'] = eval_knn_opacities_collision_loss(self.gaussians, msk, k=self.opt.collision_knn)
-                    # losses['collision'] += eval_knn_opacities_collision_loss(self.canonical_gaussians, msk, k=self.opt.collision_knn)
-                ## ↑↑ ?????
                 losses['collision'] = eval_knn_opacities_collision_loss(self.gaussians, self.mask, k=self.opt.collision_knn)
                 loss += self.opt.collision_weight * losses['collision'] / 1
+                # losses['collision'] += eval_knn_opacities_collision_loss(self.canonical_gaussians, self.mask, k=self.opt.collision_knn)
+                # loss += self.opt.collision_weight * losses['collision'] / 2
 
             if (losses['depth_st'] is not None) and (losses['depth_ed'] is not None):
                 weight_st = losses['depth_st'].detach() / (losses['depth_st'].detach() + losses['depth_ed'].detach())

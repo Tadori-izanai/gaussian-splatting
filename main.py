@@ -29,10 +29,11 @@ from main_utils import train_single, get_gaussians, print_motion_params, plot_hi
     modify_scaling, get_vis_mask, estimate_se3, eval_mu_sigma, save_axis_mesh, list_of_clusters, \
     put_axes
 from metric_utils import get_gt_motion_params, interpret_transforms, eval_axis_metrics, \
-    get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics
+    get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics, stat_axis_metrics
 
 cd_thr = -5
 dbs_eps = 0.008
+from_pgsr = False
 
 def train_single_demo(path, data_path):
     dataset, pipes, opt = get_default_args()
@@ -93,8 +94,8 @@ def cluster_demo(out_path: str, data_path: str, num_movable: int, thr: int=-5):
     storePly(os.path.join(ply_path, f'points3d.ply'), x, np.zeros_like(x))
 
 def part_init_demo(out_path, st_path, ed_path, num_movable: int):
-    gaussians_st = get_gaussians(st_path, from_chk=True)
-    gaussians_ed = get_gaussians(ed_path, from_chk=True)
+    gaussians_st = get_gaussians(st_path, from_chk=True, from_pgsr=from_pgsr)
+    gaussians_ed = get_gaussians(ed_path, from_chk=True, from_pgsr=from_pgsr)
     cd, cd_is, mpp = init_mpp(gaussians_st, gaussians_ed, thr=-4.5)
     mask_m = (mpp > .5)
     gaussians_st[mask_m].save_ply(
@@ -156,8 +157,8 @@ def joint_init_demo(out_path: str, st_path: str, num_movable: int):
 
 def art_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str, num_movable: int, thr=0.85):
     torch.autograd.set_detect_anomaly(False)
-    gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
-    gaussians_ed = get_gaussians(ed_path, from_chk=True).cancel_grads()
+    gaussians_st = get_gaussians(st_path, from_chk=True, from_pgsr=from_pgsr).cancel_grads()
+    gaussians_ed = get_gaussians(ed_path, from_chk=True, from_pgsr=from_pgsr).cancel_grads()
 
     am = GMMArtModel(gaussians_st, num_movable, new_scheme=False)
     am.set_dataset(source_path=os.path.join(os.path.realpath(data_path), 'end'), model_path=out_path, thr=cd_thr)
@@ -171,8 +172,7 @@ def art_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str, nu
     mpp = am.get_prob.detach().cpu().numpy()
     mask = (mpp > thr)
 
-    gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
-    # am.save_ppp_vis(os.path.join(out_path, 'point_cloud/iteration_19/point_cloud.ply'))
+    gaussians_st = get_gaussians(st_path, from_chk=True, from_pgsr=from_pgsr).cancel_grads()
     am.save_all_vis(-20)
     for i in range(num_movable):
         gaussians_st[mask & (part_indices == i)].save_ply(
@@ -200,7 +200,7 @@ def vis_axes_pp_demo(out_path: str, st_path: str):
     num_movable = len(mu)
     mask = np.load(os.path.join(out_path, 'mask_pre.npy'))
     part_indices = np.load(os.path.join(out_path, 'part_indices_pre.npy'))
-    gaussians_st = get_gaussians(st_path, from_chk=True).cancel_grads()
+    gaussians_st = get_gaussians(st_path, from_chk=True, from_pgsr=from_pgsr).cancel_grads()
     xyz = gaussians_st.get_xyz.detach().cpu().numpy()
     rgb = np.full(xyz.shape, 255)
     for k in np.arange(num_movable):
@@ -210,7 +210,7 @@ def vis_axes_pp_demo(out_path: str, st_path: str):
 def refinement_demo(out_path: str, st_path: str, data_path: str, num_movable: int):
     torch.autograd.set_detect_anomaly(False)
 
-    gaussians_st = get_gaussians(st_path, from_chk=True)
+    gaussians_st = get_gaussians(st_path, from_chk=True, from_pgsr=from_pgsr)
     amj = MPArtModelJoint(gaussians_st, num_movable)
     amj.set_dataset(source_path=os.path.realpath(data_path), model_path=out_path)
     t, r = amj.train()
@@ -254,19 +254,20 @@ def eval_demo(out_path: str, data_path: str, num_movable: int, reverse=True):
     pcd_gt = get_gt_point_clouds(os.path.join(data_path, 'gt/'), K=num_movable, reverse=reverse)
 
     metrics_axis = eval_axis_metrics(trans_pred, trans_gt, reverse=reverse, out_path=out_path)
+    metrics_axis_stat = stat_axis_metrics(metrics_axis)
     metrics_cd = eval_geo_metrics(pcd_pred, pcd_gt)
     with open(os.path.join(out_path, 'metrics.json'), 'w') as outfile:
-        json.dump(metrics_axis | metrics_cd, outfile, indent=4)
+        json.dump(metrics_axis | metrics_axis_stat | metrics_cd, outfile, indent=4)
 
 if __name__ == '__main__':
-    # PARIS and DTA
+    # PARIS
     if True:
         # K = 1
         # st = 'output/paris/usb_st'
         # ed = 'output/paris/usb_ed'
         # data = 'data/dta/USB_100109'
         # out = 'output/paris/usb'
-        # rev = True
+        # rev = False
 
         # K = 1
         # st = 'output/paris/blade_st'
@@ -275,6 +276,32 @@ if __name__ == '__main__':
         # out = 'output/paris/blade'
         # rev = False
 
+        # K = 1
+        # st = 'output/paris/storage_st'
+        # ed = 'output/paris/storage_ed'
+        # data = 'data/dta/storage_45135'
+        # out = 'output/paris/storage'
+        # rev = True
+
+        # K = 1
+        # st = 'output/paris/rf_st'
+        # ed = 'output/paris/rf_ed'
+        # data = 'data/dta/real_fridge'
+        # out = 'output/paris/rf'
+        # rev = False
+
+        # K = 1
+        # st = 'output/paris/rs_st'
+        # ed = 'output/paris/rs_ed'
+        # data = 'data/dta/real_storage'
+        # out = 'output/paris/rs'
+        # rev = False
+
+        pass
+    # fi
+
+    # DTA
+    if True:
         # K = 2
         # st = 'output/dta/storage_st'
         # ed = 'output/dta/storage_ed'
@@ -290,15 +317,29 @@ if __name__ == '__main__':
         pass
     # fi
 
-    # Ours failed
+    # Ours hard
     if True:
-        K = 5
-        st = 'output/single/tbr5_st'
-        ed = 'output/single/tbr5_ed'
-        data = 'data/teeburu34610'
-        out = 'output/tbr5'
-        rev = False
+        # K = 5
+        # st = 'output/single/tbr5_st'
+        # ed = 'output/single/tbr5_ed'
+        # data = 'data/teeburu34610'
+        # out = 'output/tbr5'
+        # rev = False
 
+        # K = 10
+        # st = 'output/single/str_st'
+        # ed = 'output/single/str_ed'
+        # data = 'data/sutoreeji47585'
+        # out = 'output/str'
+        # rev = False
+        # cd_thr = -10
+        # dbs_eps = 0.004
+
+        pass
+    # fi
+
+    # Ours dumped
+    if True:
         # K = 5
         # st = 'output/single/ob5_st'
         # ed = 'output/single/ob5_ed'
@@ -314,17 +355,15 @@ if __name__ == '__main__':
         # rev = False
         # cd_thr = -6
 
-        # K = 10
-        # st = 'output/single/str_st'
-        # ed = 'output/single/str_ed'
-        # data = 'data/sutoreeji47585'
-        # out = 'output/str'
+        # K = 3
+        # st = 'output/single/st3_st'
+        # ed = 'output/single/st3_ed'
+        # data = 'data/sutoreeji48063'
+        # out = 'output/st3'
         # rev = False
-        # cd_thr = -10
-        # dbs_eps = 0.004
 
         pass
-    # fi
+    # if
 
     # ArtGS
     if True:
@@ -368,12 +407,12 @@ if __name__ == '__main__':
 
     # Ours
     if True:
-        # K = 4
-        # st = 'output/single/tbr4_st'
-        # ed = 'output/single/tbr4_ed'
-        # data = 'data/teeburu34178'
-        # out = 'output/tbr4'
-        # rev = False
+        K = 4
+        st = 'output/single/tbr4_st'
+        ed = 'output/single/tbr4_ed'
+        data = 'data/teeburu34178'
+        out = 'output/tbr4'
+        rev = False
 
         # K = 6
         # st = 'output/single/sut_st'
@@ -382,7 +421,6 @@ if __name__ == '__main__':
         # out = 'output/sut'
         # rev = False
 
-        ################## Ours extra ##################
         # K = 2
         # st = 'output/single/mado_st'
         # ed = 'output/single/mado_ed'
@@ -405,13 +443,6 @@ if __name__ == '__main__':
         # rev = False
 
         # K = 3
-        # st = 'output/single/st3_st'
-        # ed = 'output/single/st3_ed'
-        # data = 'data/sutoreeji48063'
-        # out = 'output/st3'
-        # rev = False
-
-        # K = 3
         # st = 'output/single/te3_st'
         # ed = 'output/single/te3_ed'
         # data = 'data/teeburu33116'
@@ -419,7 +450,13 @@ if __name__ == '__main__':
         # rev = False
 
         pass
-    # fifififififififififififififififififififififififififififififififififififi
+    # fi
+
+    # from_pgsr = True
+    # st = st.replace('single', 'pgsr_wbce')
+    # ed = ed.replace('single', 'pgsr_wbce')
+
+    # _______________________________________________________
 
     # train_single_demo(st, os.path.join(data, 'start'))
     # train_single_demo(ed, os.path.join(data, 'end'))
@@ -427,7 +464,7 @@ if __name__ == '__main__':
 
     # cluster_demo(out, data, K, thr=cd_thr)
     # part_init_demo(out, st, ed, K)
-    joint_init_demo(out, st, K)
+    # joint_init_demo(out, st, K)
     # exit(0)
 
     get_gt_motion_params(data, reverse=rev)

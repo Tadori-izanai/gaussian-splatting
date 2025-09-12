@@ -171,6 +171,24 @@ def eval_axis_metrics(trans_pred: list[dict], trans_gt: list[dict], reverse: boo
         )
     return metric_dict
 
+def stat_axis_metrics(metric_axis: dict) -> dict:
+    metrics = metric_axis['axes']
+    stat = {'axes_stat': {}}
+    axis_angles = np.array([item['axis_angle'] for item in metrics])
+    axis_dists = np.array([item['axis_dist'] for item in metrics])
+    theta_diffs = np.array([item['theta_diff'] for item in metrics])
+    stat['axes_stat']['mean'] = {
+        "axis_angle": float(np.mean(axis_angles)),
+        "axis_dist": float(np.mean(axis_dists)),
+        "theta_diff": float(np.mean(theta_diffs)),
+    }
+    stat['axes_stat']['max'] = {
+        "axis_angle": float(np.max(axis_angles)),
+        "axis_dist": float(np.max(axis_dists)),
+        "theta_diff": float(np.max(theta_diffs)),
+    }
+    return stat
+
 ############  axes 👆🏻     ############
 ############  geometry 👇🏻 ############
 
@@ -251,6 +269,7 @@ def eval_geo_metrics(pred_pc: dict, gt_pc: dict) -> dict:
             min_cd = min(min_cd, cd)
         metric_dict['chamfer_dynamics'].append(min_cd)
 
+    metric_dict['chamfer_dynamics_avg'] = np.array(metric_dict['chamfer_dynamics']).mean().tolist()
     metric_dict['chamfer_dynamic'] = compute_chamfer(pred_pc['movable'], gt_pc['movable'])
     metric_dict['chamfer_static'] = compute_chamfer(pred_pc['static'], gt_pc['static'])
     metric_dict['chamfer_whole'] = compute_chamfer(pred_pc['whole'], gt_pc['whole'])

@@ -91,14 +91,19 @@ def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, 
         gaussians.prune_points(prune_mask)
     torch.save((gaussians.capture(), opt.iterations), os.path.join(dataset.model_path, 'chkpnt.pth'))
 
-def get_gaussians(model_path, from_chk=True, iters=30003) -> GaussianModel:
+def get_gaussians(model_path, from_chk=True, iters=None, from_pgsr=False) -> GaussianModel:
     gaussians = GaussianModel(0)
     if from_chk:
         dataset, pipes, opt = get_default_args()
         model_params, _ = torch.load(os.path.join(model_path, 'chkpnt.pth'))
-        gaussians.restore(model_params, opt)
+        if from_pgsr:
+            gaussians.restore_gpsr(model_params, opt)
+        else:
+            gaussians.restore(model_params, opt)
     else:
+        _, _, opt = get_default_args()
         gaussians.load_ply(os.path.join(model_path, f'point_cloud/iteration_{iters}/point_cloud.ply'))
+        gaussians.training_setup(opt)
     return gaussians
 
 def print_motion_params(out_path: str):

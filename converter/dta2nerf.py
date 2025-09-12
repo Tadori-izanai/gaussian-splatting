@@ -25,6 +25,36 @@ def rgb_mask_to_rgba(img_rgb: np.ndarray, img_mask: np.ndarray) -> np.ndarray:
     img_rgba[:, :, 3] = img_mask
     return img_rgba
 
+def gen_depth_images(path: str) -> None:
+    depth_path = os.path.join(path, 'depth_filtered')
+    mask_path = os.path.join(path, 'mask')
+    output_path = os.path.join(path, 'depth')
+    os.makedirs(output_path, exist_ok=True)
+
+    for img_file in os.listdir(depth_path):
+        if not img_file.endswith(".png"):
+            continue
+
+        img_d = os.path.join(depth_path, img_file)
+        img_mask = os.path.join(mask_path, img_file)
+        with Image.open(img_d) as depth_img, Image.open(img_mask) as mask_img:
+            target_size = mask_img.size
+            # 2. Resize the depth image
+            resized_img = depth_img.resize(target_size, resample=Image.Resampling.NEAREST)
+
+            # 3. Convert to NumPy arrays to perform masking
+            resized_array = np.array(resized_img)
+            mask_array = np.array(mask_img)
+
+            # 4. Apply the mask using NumPy indexing
+            resized_array[mask_array == 0] = 0
+
+            # 5. Convert back to a Pillow image to save, preserving the mode
+            final_img = Image.fromarray(resized_array, mode=resized_img.mode)
+            final_img.save(os.path.join(output_path, img_file))
+
+        print('done with image:', img_file)
+
 def gen_rgba_images(path: str) -> None:
     rgb_path = os.path.join(path, 'color_segmented')
     mask_path = os.path.join(path, 'mask')
@@ -83,7 +113,8 @@ def convert_to_nerf(path: str, res_x: int, is_start_zero: bool) -> None:
         source_img = os.path.join(path, 'color_rgba', img_name)
         target_img = os.path.join(path, 'end' if is_end else 'start', 'train', img_name)
         Image.open(source_img).save(target_img)
-        source_img = os.path.join(path, 'depth_filtered', img_name)
+        # source_img = os.path.join(path, 'depth_filtered', img_name)
+        source_img = os.path.join(path, 'depth', img_name)
         target_img = os.path.join(path, 'end' if is_end else 'start', 'train_d', img_name)
         Image.open(source_img).save(target_img)
         print('done with:', img_name)
@@ -95,11 +126,17 @@ def convert_to_nerf(path: str, res_x: int, is_start_zero: bool) -> None:
 
 
 if __name__ == '__main__':
-    # data_path = 'data/dta/storage_45135'  # False
+    # data_path = 'data/dta/storage_45135'  # False, 800
     # data_path = 'data/dta/USB_100109'  # True
     # data_path = 'data/dta/blade_103706'  # True
     # data_path = 'data/dta_multi/fridge_10489' # False
-    data_path = 'data/dta_multi/storage_47254'  # False
+    # data_path = 'data/dta_multi/storage_47254'  # False
 
-    gen_rgba_images(data_path)
-    convert_to_nerf(data_path, res_x=800, is_start_zero=False)
+    data_path = 'data/dta/real_fridge'  # True, 960
+    # data_path = 'data/dta/real_storage' # True
+
+    # gen_depth_images(data_path)
+    # exit(0)
+
+    # gen_rgba_images(data_path)
+    convert_to_nerf(data_path, res_x=960, is_start_zero=True)

@@ -105,6 +105,31 @@ class GaussianModel:
         self.optimizer.load_state_dict(opt_dict)
         return self
 
+    def restore_gpsr(self, model_args, training_args):
+        (self.active_sh_degree, 
+        self._xyz, 
+        self._knn_f,
+        self._features_dc, 
+        self._features_rest,
+        self._scaling, 
+        self._rotation, 
+        self._opacity,
+        self.max_radii2D, 
+        self.max_weight,
+        xyz_gradient_accum, 
+        xyz_gradient_accum_abs,
+        denom,
+        denom_abs,
+        opt_dict, 
+        self.spatial_lr_scale,
+        ) = model_args
+        self.training_setup_pgsr(training_args)
+        self.xyz_gradient_accum = xyz_gradient_accum
+        # self.xyz_gradient_accum_abs = xyz_gradient_accum_abs
+        self.denom = denom
+        # self.denom_abs = denom_abs
+        self.optimizer.load_state_dict(opt_dict)
+
     @property
     def get_scaling(self):
         return self.scaling_activation(self._scaling)
@@ -248,6 +273,31 @@ class GaussianModel:
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+    def training_setup_pgsr(self, training_args):
+        self.percent_dense = training_args.percent_dense
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        # self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        # self.denom_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        # self.abs_split_radii2D_threshold = training_args.abs_split_radii2D_threshold
+        # self.max_abs_split_points = training_args.max_abs_split_points
+        # self.max_all_points = training_args.max_all_points
+        l = [
+            {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+            {'params': [self._knn_f], 'lr': 0.01, "name": "knn_f"},
+            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
+            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+        ]
+
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.position_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
