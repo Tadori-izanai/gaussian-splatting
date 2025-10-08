@@ -4,7 +4,7 @@ import torch
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, pca_on_pointcloud, \
     calculate_obb_o3d, calculate_obb_pv, estimate_normals_o3d, estimate_normals_pv, get_oriented_aabb, \
-    get_bounding_box
+    get_bounding_box, estimate_normals_ransac_o3d
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -84,11 +84,8 @@ def cluster_demo(out_path: str, data_path: str, num_movable: int, thr: int=-5):
     )
     for k, pcd in pts[:num_movable]:
         if k == -1:
-            k1, pcd1 = pts[num_movable]
-            normals = estimate_normals_o3d(pcd1)
-            storePly(os.path.join(ply_path, f'clusters/points3d_{k1}.ply'), pcd1, np.zeros_like(pcd1), normals)
+            k, pcd = pts[num_movable]
             print('warning: has -1')
-            continue
         normals = estimate_normals_o3d(pcd)
         storePly(os.path.join(ply_path, f'clusters/points3d_{k}.ply'), pcd, np.zeros_like(pcd), normals)
     storePly(os.path.join(ply_path, f'points3d.ply'), x, np.zeros_like(x))
@@ -112,6 +109,21 @@ def part_init_demo(out_path, st_path, ed_path, num_movable: int):
     np.save(os.path.join(out_path, 'sigma_init.npy'), sigma)
 
 def joint_init_demo(out_path: str, st_path: str, num_movable: int):
+    def rotate_axes(axes_to_rotate: np.ndarray, theta_deg: float) -> np.ndarray:
+        random_axis = np.random.rand(3)
+        while np.linalg.norm(random_axis) < 1e-6:
+            random_axis = np.random.rand(3)
+        random_axis /= np.linalg.norm(random_axis)
+
+        theta_rad = np.deg2rad(theta_deg)
+        x, y, z = random_axis
+        K = np.array([[0, -z, y],
+                      [z, 0, -x],
+                      [-y, x, 0]])
+        I = np.eye(3)
+        R = I + np.sin(theta_rad) * K + (1 - np.cos(theta_rad)) * np.dot(K, K)
+        return axes_to_rotate @ R.T
+
     nrm_dir = os.path.join(out_path, 'clustering/nrm_axes')
     gaussians_dir = os.path.join(out_path, 'clustering/axes_gaussians')
     os.makedirs(nrm_dir, exist_ok=True)
@@ -120,17 +132,13 @@ def joint_init_demo(out_path: str, st_path: str, num_movable: int):
     parts, nms = list_of_clusters(os.path.join(out_path, 'clustering/clusters'), num_movable, ret_normal=True)
     mu = np.load(os.path.join(out_path, 'mu_init.npy'))
 
-    # from cues import cues
-    # types = cues[out_path]['joint_types']
-    # prismatic_nms = [n for n, t in zip(nms, types) if t == 'p']
-    # dirs_p = np.zeros((3, 3))
-    # if len(prismatic_nms) > 0:
-    #     dirs_p = estimate_principal_directions(np.concatenate(prismatic_nms, axis=0), ort='gs')
-    # np.save(os.path.join(out_path, f'clustering/axes_p.npy'), dirs_p)
-
     axes = np.zeros((num_movable, 3, 3))
     for k, nm in enumerate(nms):
         axes[k] = estimate_principal_directions(nm, ort='gs')
+
+    # for k in [0, 1]:
+    #     axes[k] = rotate_axes(axes[k], 5)
+
     neighbors = find_and_unify_orthogonal(axes)
 
     bb_centers, bb_extents = [], []
@@ -300,7 +308,7 @@ if __name__ == '__main__':
         pass
     # fi
 
-    # DTA
+    # DTA (2)
     if True:
         # K = 2
         # st = 'output/dta/storage_st'
@@ -317,7 +325,7 @@ if __name__ == '__main__':
         pass
     # fi
 
-    # Ours hard
+    # Ours hard (2)
     if True:
         # K = 5
         # st = 'output/single/tbr5_st'
@@ -365,7 +373,7 @@ if __name__ == '__main__':
         pass
     # if
 
-    # ArtGS
+    # ArtGS (5)
     if True:
         # K = 3
         # st = 'output/artgs/oven_st'
@@ -405,7 +413,7 @@ if __name__ == '__main__':
         pass
     # fi
 
-    # Ours
+    # Ours (6)
     if True:
         K = 4
         st = 'output/single/tbr4_st'

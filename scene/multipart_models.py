@@ -958,6 +958,16 @@ class GMMArtModel(MPArtModelBasic):
         # self.joint_pred()
         self._set_ed_knn_indices(gt_gaussians)
 
+        # # --- 在这里添加代码 (块 1) ---
+        # # 为角度记录功能初始化CSV文件
+        # for k in [0, 1, 2, 3]:
+        #     file_path = os.path.join(self.dataset.model_path, f'ang/angles15_{k}.csv')
+        #     # 创建表头
+        #     header = ["iteration"] + [f"angle_to_{j}" for j in range(self.num_movable)]
+        #     with open(file_path, 'w') as f:
+        #         f.write(",".join(header) + "\n")
+        # # --- 添加结束 ---
+
         progress_bar = tqdm(range(iterations), desc="Training progress")
         ema_loss_for_log = 0.0
         for i in range(1, iterations + 1):
@@ -988,6 +998,11 @@ class GMMArtModel(MPArtModelBasic):
                 if i % 10 == 0:
                     progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
                     progress_bar.update(10)
+
+                    # # --- 在这里添加代码 (块 2) ---
+                    # # 调用日志记录函数
+                    # self._log_translation_angles(i)
+                    # # --- 添加结束 ---
 
                 if i < iterations:
                     if i % self.opt.sgd_interval == 0:
@@ -1027,6 +1042,41 @@ class GMMArtModel(MPArtModelBasic):
                 self._show_losses(i, losses)
         progress_bar.close()
         return self.get_t, self.get_r
+
+    def _log_translation_angles(self, iteration: int):
+        """计算并记录平移向量之间的夹角到CSV文件。"""
+        # 获取所有当前的平移向量
+        translations = [t.detach() for t in self.get_t]
+        num_joints = len(translations)
+
+        # 定义一个计算角度的辅助函数
+        def angle_between(v1, v2, eps=1e-8):
+            # 归一化向量
+            v1_u = v1 / (torch.linalg.norm(v1) + eps)
+            v2_u = v2 / (torch.linalg.norm(v2) + eps)
+            # 计算点积并限制在[-1, 1]范围内以避免数值错误
+            dot_product = torch.clamp(torch.dot(v1_u, v2_u), -1.0, 1.0)
+            # 计算反余弦得到弧度，再转换为角度
+            angle_rad = torch.acos(torch.abs(dot_product))
+            return torch.rad2deg(angle_rad).item()
+
+        # 对每个关节 k，计算其与所有其他关节 j 的平移向量夹角
+        for k in [0, 1, 2, 3]:
+            angles = []
+            for j in range(num_joints):
+                if k == j:
+                    angles.append(f"{0.0:.4f}")  # 与自身的夹角为0
+                else:
+                    angle = angle_between(translations[k], translations[j])
+                    angles.append(f"{angle:.4f}")
+
+            # 准备要写入CSV的一行数据
+            row_data = [str(iteration)] + angles
+
+            # 将数据追加到对应的CSV文件中
+            file_path = os.path.join(self.dataset.model_path, f'ang/angles15_{k}.csv')
+            with open(file_path, 'a') as f:
+                f.write(",".join(row_data) + "\n")
 
 class MPArtModelJoint(MPArtModelBasic):
     def setup_args_extra(self):

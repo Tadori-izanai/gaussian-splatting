@@ -28,6 +28,8 @@ from sklearn.decomposition import PCA
 import open3d as o3d
 import pyvista as pv
 from sklearn.cluster import KMeans
+from tqdm import tqdm
+from joblib import Parallel, delayed
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -458,8 +460,19 @@ def estimate_principal_directions(normals: np.ndarray, ort: str='qr', k: int=3) 
         Returns:
             directions: np.ndarray of shape (3, 3), where each row is a direction.
         """
+    normals = normals[~np.isnan(normals).any(axis=1)]
+
     # Normalize normals
-    normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    valid_mask = (norms > 1e-8).flatten()
+
+    if np.sum(valid_mask) == 0:
+        return np.eye(3)
+
+    normals = normals[valid_mask]
+    norms = norms[valid_mask]
+
+    normals = normals / norms
 
     # Map to first octant
     normals_abs = np.abs(normals)
@@ -669,6 +682,60 @@ def estimate_normals_o3d(points, radius_multiplier=3, max_nn=30):
     normals = np.asarray(pcd.normals)
     return normals
 
+def estimate_normals_ransac_o3d(points, radius=0.01, max_nn=30, distance_threshold=0.001, ransac_n=3,
+                                num_iterations=100, min_inliers=10):
+    """
+    Estimate normals for a point cloud using RANSAC-based local plane fitting.
+
+    Parameters:
+    - points: np.ndarray of shape (N, 3) - The input point cloud.
+    - radius: float - Radius for neighbor search.
+    - max_nn: int - Maximum number of nearest neighbors.
+    - distance_threshold: float - Distance threshold for inliers in RANSAC.
+    - ransac_n: int - Number of points to sample for plane fitting (default 3 for plane).
+    - num_iterations: int - Number of RANSAC iterations per local fit.
+    - min_inliers: int - Minimum number of inliers required for a valid fit.
+
+    Returns:
+    - normals: np.ndarray of shape (N, 3) - Estimated normals.
+    """
+    # Create Open3D point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+
+    # Build KDTree for efficient neighbor search
+    pcd_tree = o3d.geometry.KDTreeFlann(pcd)
+
+    # Initialize normals array
+    N = len(points)
+    normals = np.zeros((N, 3))
+
+    for i in tqdm(range(N)):
+        # Find neighbors
+        [_, idx, _] = pcd_tree.search_hybrid_vector_3d(pcd.points[i], radius=radius, max_nn=max_nn)
+
+        if len(idx) < ransac_n:
+            # Not enough points, skip or set to NaN/zero
+            continue
+
+        # Create sub-point cloud from neighbors
+        sub_pcd = pcd.select_by_index(idx)
+
+        # Fit plane using RANSAC
+        plane_model, inliers = sub_pcd.segment_plane(
+            distance_threshold=distance_threshold,
+            ransac_n=ransac_n,
+            num_iterations=num_iterations
+        )
+
+        if len(inliers) >= min_inliers:
+            # Extract normal from plane model [a, b, c, d] and normalize
+            normal = plane_model[:3]
+            normal /= np.linalg.norm(normal)
+            normals[i] = normal
+        # Else, leave as zero or handle differently
+
+    return normals
 
 def estimate_normals_pv(points, feature_angle=30.0, splitting=True):
     """
