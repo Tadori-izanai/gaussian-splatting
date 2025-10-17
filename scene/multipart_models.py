@@ -752,8 +752,9 @@ class GMMArtModel(MPArtModelBasic):
             pcd_deformed = torch.cat(self.pcds_deformed, dim=0)
             x = sample_pts(pcd_deformed, 5000)
             y = sample_pts(self.pcd_gt, -1)
-            dist, _ = chamfer_distance(x.unsqueeze(0), y.unsqueeze(0), batch_reduction=None)
-            # dist, _ = chamfer_distance(y.unsqueeze(0), x.unsqueeze(0), batch_reduction=None)
+            # dist, _ = chamfer_distance(x.unsqueeze(0), y.unsqueeze(0), batch_reduction=None)
+            dist, _ = chamfer_distance(x.unsqueeze(0), y.unsqueeze(0), batch_reduction=None, single_directional=True)
+            # dist, _ = chamfer_distance(y.unsqueeze(0), x.unsqueeze(0), batch_reduction=None, single_directional=True)
             losses['cd'] = dist[0]
             loss += self.opt.cd_weight * losses['cd']
 
@@ -968,6 +969,13 @@ class GMMArtModel(MPArtModelBasic):
         #         f.write(",".join(header) + "\n")
         # # --- 添加结束 ---
 
+        # # --- 在这里添加代码 (块 1) ---
+        # file_path = os.path.join(self.dataset.model_path, f'cd_losses-edm.csv')
+        # header = ["iteration"] + [f"cd_loss_{j}" for j in range(self.num_movable)]
+        # with open(file_path, 'w') as f:
+        #     f.write(",".join(header) + "\n")
+        # # --- 添加结束 ---
+
         progress_bar = tqdm(range(iterations), desc="Training progress")
         ema_loss_for_log = 0.0
         for i in range(1, iterations + 1):
@@ -1002,6 +1010,7 @@ class GMMArtModel(MPArtModelBasic):
                     # # --- 在这里添加代码 (块 2) ---
                     # # 调用日志记录函数
                     # self._log_translation_angles(i)
+                    # self._log_cd_losses(i, gt_gaussians)
                     # # --- 添加结束 ---
 
                 if i < iterations:
@@ -1042,6 +1051,20 @@ class GMMArtModel(MPArtModelBasic):
                 self._show_losses(i, losses)
         progress_bar.close()
         return self.get_t, self.get_r
+
+    def _log_cd_losses(self, iteration, gt_gaussians):
+        # y = sample_pts(gt_gaussians.get_xyz, -1).detach()
+        y = sample_pts(self.pcd_gt, -1).detach()
+        cds = []
+        for k in range(self.num_movable):
+            x = sample_pts(self.pcds_deformed[k].detach(), 5000)
+            dist, _ = chamfer_distance(x.unsqueeze(0), y.unsqueeze(0), batch_reduction=None, single_directional=True)
+            cds.append(f"{dist[0].item():.4f}")
+
+        row_data = [str(iteration)] + cds
+        file_path = os.path.join(self.dataset.model_path, f'cd_losses-edm.csv')
+        with open(file_path, 'a') as f:
+            f.write(",".join(row_data) + "\n")
 
     def _log_translation_angles(self, iteration: int):
         """计算并记录平移向量之间的夹角到CSV文件。"""

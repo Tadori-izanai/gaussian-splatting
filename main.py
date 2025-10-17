@@ -4,7 +4,7 @@ import torch
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, pca_on_pointcloud, \
     calculate_obb_o3d, calculate_obb_pv, estimate_normals_o3d, estimate_normals_pv, get_oriented_aabb, \
-    get_bounding_box, estimate_normals_ransac_o3d
+    get_bounding_box, estimate_normals_ransac_o3d, DisjointSet, get_rotation_axis
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -27,7 +27,7 @@ from scene.dataset_readers import fetchPly, storePly
 from main_utils import train_single, get_gaussians, print_motion_params, plot_hist, \
     mk_output_dir, init_mpp, get_ppp_from_gmm, get_ppp_from_gmm_v2, eval_init_gmm_params, \
     modify_scaling, get_vis_mask, estimate_se3, eval_mu_sigma, save_axis_mesh, list_of_clusters, \
-    put_axes
+    put_axes, get_obb_proximity_matrix, get_tr_proximity_matrix, get_minimum_angles
 from metric_utils import get_gt_motion_params, interpret_transforms, eval_axis_metrics, \
     get_pred_point_cloud, get_gt_point_clouds, eval_geo_metrics, stat_axis_metrics
 
@@ -191,6 +191,58 @@ def art_optim_demo(out_path: str, st_path: str, ed_path: str, data_path: str, nu
     np.save(os.path.join(out_path, 't_pre.npy'), [tt.detach().cpu().numpy() for tt in t])
     np.save(os.path.join(out_path, 'mask_pre.npy'), mask)
     np.save(os.path.join(out_path, 'part_indices_pre'), part_indices)
+
+def merge_subparts(out_path: str, num_movable: int) -> int:
+    part_indices = np.load(os.path.join(out_path, 'part_indices_pre.npy'))
+    r = np.load(os.path.join(out_path, 'r_pre.npy'))
+    t = np.load(os.path.join(out_path, 't_pre.npy'))
+    axes = np.load(os.path.join(out_path, 'clustering/axes.npy'))
+    bb_centers = np.load(os.path.join(out_path, 'clustering/bb_centers.npy'))
+    bb_extents = np.load(os.path.join(out_path, 'clustering/bb_extents.npy'))
+
+    volume_ratios, _ = get_obb_proximity_matrix(axes, bb_centers, bb_extents * 1.05)
+    tr_close = get_tr_proximity_matrix(r, t)
+    min_angles = get_minimum_angles(axes, r, t)
+    print(volume_ratios)
+    print(tr_close)
+    print(min_angles)
+
+    ds = DisjointSet(num_movable)
+    for k in range(num_movable):
+        if min_angles[k] > 2:
+            j = np.argmax(volume_ratios[k])
+            if min_angles[j] < 2:
+                ds.connect(k, j)
+                print('merge:', k, j)
+            continue
+
+        j, obb_max = -1, 0.04
+        for i in range(num_movable):
+            if i == k or not tr_close[k][i] or ds.is_connected(k, i):
+                continue
+            if volume_ratios[k][i] > obb_max:
+                j, obb_max = i, volume_ratios[k][i]
+
+        if j != -1:
+            if min_angles[j] < min_angles[k]:
+                ds.connect(k, j)
+            else:
+                ds.connect(j, k)
+            print('merge:', k, j)
+
+    merge_indices, uniques = ds.get_new_indices()
+    new_part_indices = np.zeros_like(part_indices, dtype=int)
+    for k in range(num_movable):
+        new_part_indices[part_indices == k] = merge_indices[ds.parent[k]]
+    new_r, new_t = [], []
+    for idx in uniques:
+        new_r.append(r[idx])
+        new_t.append(t[idx])
+
+    np.save(os.path.join(out_path, '_r_pre.npy'), new_r)
+    np.save(os.path.join(out_path, '_t_pre.npy'), new_t)
+    np.save(os.path.join(out_path, '_part_indices_pre'), new_part_indices)
+    return len(uniques)
 
 def vis_axes_pp_demo(out_path: str, st_path: str):
     ply_path = os.path.join(out_path, 'ply')
@@ -471,13 +523,15 @@ if __name__ == '__main__':
     # exit(0)
 
     # cluster_demo(out, data, K, thr=cd_thr)
-    # part_init_demo(out, st, ed, K)
-    # joint_init_demo(out, st, K)
-    # exit(0)
+    part_init_demo(out, st, ed, K)
+    joint_init_demo(out, st, K)
+    exit(0)
 
     get_gt_motion_params(data, reverse=rev)
 
     art_optim_demo(out, st, ed, data, num_movable=K)
+    # K = merge_subparts(out, K)
+
     # refinement_demo(out, st, data, num_movable=K)
     eval_demo(out, data, num_movable=K, reverse=rev)
     vis_axes_pp_demo(out, st)

@@ -17,7 +17,7 @@ from scene import BWScenes
 from scene.gaussian_model import GaussianModel
 from scene.dataset_readers import readCamerasFromTransforms, fetchPly
 from utils.general_utils import get_per_point_cd, otsu_with_peak_filtering, inverse_sigmoid, \
-    decompose_covariance_matrix, rotation_matrix_from_axis_angle, eval_quad, knn, mat2quat, quat_mult
+    decompose_covariance_matrix, rotation_matrix_from_axis_angle, eval_quad, knn, mat2quat, quat_mult, get_rotation_axis
 from utils.graphics_utils import getProjectionMatrix, getWorld2View
 
 def train_single(dataset, opt, pipe, gaussians: GaussianModel, bce_weight=None, depth_weight=None):
@@ -340,6 +340,142 @@ def put_axes(out_path, st_path, num_movable: int):
         obj_with_axes = gaussians_st + axis0 + axis1 + axis2
         obj_with_axes.save_ply(os.path.join(out_path, f'point_cloud/iteration_-{k + 100}/point_cloud.ply'))
     return
+
+def get_tr_proximity_matrix(r, t):
+    def are_transforms_close(R1, t1, R2, t2, translation_threshold=0.05, rotation_threshold_deg=5):
+        """
+        判断两个三维刚体变换 (R, t) 是否足够接近。
+
+        接近的定义是平移向量之间的欧几里得距离和旋转矩阵之间的夹角
+        分别小于给定的阈值。
+
+        Args:
+            R1 (np.ndarray): 形状为 (3, 3) 的旋转矩阵1。
+            t1 (np.ndarray): 形状为 (3,) 的平移向量1。
+            R2 (np.ndarray): 形状为 (3, 3) 的旋转矩阵2。
+            t2 (np.ndarray): 形状为 (3,) 的平移向量2。
+            translation_threshold (float): 允许的平移向量之间的最大欧几里得距离。
+            rotation_threshold_deg (float): 允许的旋转矩阵之间的最大夹角（单位：度）。
+
+        Returns:
+            bool: 如果平移和旋转的差异都在阈值内，则返回 True，否则返回 False。
+        """
+        # 1. 计算平移向量之间的欧几里得距离
+        translation_dist = np.linalg.norm(t1 - t2)
+
+        if translation_dist / (np.linalg.norm(t1) + np.linalg.norm(t2)) > translation_threshold:
+            return False
+
+        # 2. 计算旋转矩阵之间的夹角
+        # 相对旋转矩阵 R_rel 可以将 R1 的姿态变换到 R2 的姿态
+        R_rel = np.dot(R2, R1.T)
+
+        # 旋转矩阵的迹（trace）和旋转角度 theta 的关系是: trace(R) = 1 + 2*cos(theta)
+        # 因此, theta = arccos((trace(R) - 1) / 2)
+        # 使用 np.clip 防止由于浮点数精度问题导致 trace 的值略微超出 [-1, 3] 的范围
+        trace_val = np.clip(np.trace(R_rel), -1.0, 3.0)
+        angle_rad = np.arccos((trace_val - 1) / 2.0)
+        angle_deg = np.rad2deg(angle_rad)
+
+        if angle_deg > rotation_threshold_deg:
+            return False
+        return True
+
+    K = r.shape[0]
+    proximity_matrix = np.zeros((K, K), dtype=bool)
+    for i in range(K):
+        for j in range(K):
+            proximity_matrix[i, j] = are_transforms_close(r[i], t[i], r[j], t[j])
+    return proximity_matrix
+
+def get_minimum_angles(axes, r, t):
+    num_movable = axes.shape[0]
+
+    angles = np.zeros(num_movable)
+    for k in range(num_movable):
+        d = t[k] / np.linalg.norm(t[k])
+        if np.abs(np.trace(r[k])) < 1 + 2 * np.cos(np.deg2rad(5)):
+            d = get_rotation_axis(r[k], t[k])[1]
+
+        dots = np.clip(axes[k] @ d, -1.0, 1.0)
+        ang_rad = np.arccos(np.abs(dots).max())
+        angles[k] = np.rad2deg(ang_rad)
+    return angles
+
+def get_obb_proximity_matrix(axes, centers, extents, num_samples=100000):
+    """
+    Calculates a matrix of proximity scores between OBBs based on intersection
+    volume ratio, approximated using a vectorized Monte Carlo method.
+
+    The score matrix[i, j] is an approximation of:
+    intersection_volume(OBB_i, OBB_j) / volume(OBB_i)
+
+    Args:
+        axes (np.ndarray): Shape (K, 3, 3). Orientation axes for K OBBs.
+        centers (np.ndarray): Shape (K, 3). Center points for K OBBs.
+        extents (np.ndarray): Shape (K, 3). Half-lengths (extents) for K OBBs.
+        num_samples (int): Number of random points to sample for the approximation.
+
+    Returns:
+        np.ndarray: A (K, K) float matrix of proximity scores.
+    """
+    def are_points_inside_obb(points, obb_center, obb_extents, obb_axes):
+        """
+        Checks if an array of points are inside an OBB using vectorization.
+
+        Args:
+            points (np.ndarray): Shape (N, 3). The N points to check.
+            obb_center (np.ndarray): Shape (3,). The center of the OBB.
+            obb_extents (np.ndarray): Shape (3,). The half-lengths of the OBB.
+            obb_axes (np.ndarray): Shape (3, 3). The orientation axes of the OBB.
+
+        Returns:
+            np.ndarray: A boolean array of shape (N,) where True indicates the
+                        corresponding point is inside the OBB.
+        """
+        # 1. Translate points to be relative to the OBB's center.
+        # Broadcasting handles this: (N, 3) - (3,) -> (N, 3)
+        vecs_to_points = points - obb_center
+
+        # 2. Rotate the points into the OBB's local coordinate system.
+        # obb_axes is a rotation matrix R, its transpose R.T is the inverse rotation.
+        # We perform (P - C) @ R.T for all points at once.
+        # (N, 3) @ (3, 3) -> (N, 3)
+        local_points = np.dot(vecs_to_points, obb_axes)  # Using dot for clarity, same as @
+
+        # 3. Check if the local coordinates of all points are within the extents.
+        # np.abs() is element-wise.
+        # The comparison uses broadcasting: (N, 3) <= (3,) -> (N, 3)
+        # np.all(..., axis=1) checks along the xyz-axis for each point.
+        # The result is a boolean array of shape (N,).
+        return np.all(np.abs(local_points) <= obb_extents, axis=1)
+
+    K = centers.shape[0]
+    proximity_matrix = np.zeros((K, K), dtype=float)
+    merge_likelihood = np.zeros(K)
+
+    for i in range(K):
+        # Generate random points in OBB i's local coords and transform to world
+        local_samples = np.random.uniform(-1, 1, (num_samples, 3)) * extents[i]
+        world_samples = centers[i] + np.dot(local_samples, axes[i].T)
+
+        is_in_others = np.zeros(num_samples, dtype=bool)
+        for j in range(K):
+            if i == j:
+                proximity_matrix[i, j] = -1
+                continue
+
+            # Use the vectorized function to check all points at once
+            is_inside = are_points_inside_obb(world_samples, centers[j], extents[j], axes[j])
+            is_in_others |= is_inside
+
+            # np.sum() on a boolean array counts the number of True values
+            intersection_count = np.sum(is_inside)
+
+            proximity_matrix[i, j] = intersection_count / num_samples
+        merge_likelihood[i] = is_in_others.astype(int).mean()
+
+    return proximity_matrix, merge_likelihood
 
 if __name__ == '__main__':
     arrow_path = 'output/zarrow/mesh.ply'

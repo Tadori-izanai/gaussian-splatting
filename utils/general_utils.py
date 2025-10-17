@@ -31,6 +31,29 @@ from sklearn.cluster import KMeans
 from tqdm import tqdm
 from joblib import Parallel, delayed
 
+class DisjointSet:
+    def __init__(self, n: int):
+        self.parent = np.arange(n)
+
+    def find(self, x):
+        if self.parent[x] != x:
+            self.parent[x] = self.find(self.parent[x])
+        return self.parent[x]
+
+    def is_connected(self, x, y):
+        return self.find(x) == self.find(y)
+
+    def connect(self, x, y):
+        """
+        :param x: merged
+        :param y: retained
+        """
+        self.parent[self.find(x)] = self.find(y)
+
+    def get_new_indices(self):
+        u = np.unique(self.parent)
+        return {u[k]: k for k in range(len(u))}, u
+
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
 
@@ -1069,7 +1092,7 @@ def find_and_unify_orthogonal(matrices: np.ndarray, threshold: float=3) -> np.nd
 
     neighbor_counts = np.sum(distances < threshold, axis=1)
     if np.all(neighbor_counts <= 1):  # Handle case with no clusters
-        return
+        return distances < threshold
 
     ref_idx = np.argmax(neighbor_counts)
     q_ref = matrices[ref_idx]

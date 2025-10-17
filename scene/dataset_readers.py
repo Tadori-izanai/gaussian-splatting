@@ -117,11 +117,14 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     sys.stdout.write('\n')
     return cam_infos
 
-def fetchPly(path):
+def fetchPly(path, uint_colors=False):
     plydata = PlyData.read(path)
     vertices = plydata['vertex']
     positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
-    colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
+    if uint_colors:
+        colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T
+    else:
+        colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
     # normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
     try:
         normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
